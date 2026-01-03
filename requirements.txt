@@ -1,0 +1,35 @@
+# Core FastAPI dependencies
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.6
+
+# Database - SQLAlchemy 2.x with Python 3.13 support
+sqlalchemy==2.0.36
+# psycopg2-binary only needed for PostgreSQL (Docker/Linux)
+# On Windows, SQLite is used by default - no PostgreSQL client needed
+psycopg2-binary==2.9.9; sys_platform != "win32"
+
+# Pydantic v2 with Python 3.13 compatible versions (pre-built wheels)
+pydantic==2.9.2
+pydantic-core==2.23.4
+pydantic-settings==2.6.1
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==24.1.0
+PyYAML==6.0.2
+
+# AI/ML
+openai==1.51.0
+
+# Testing
+pytest==8.3.3
+httpx==0.27.0
+
+# PDF generation
+reportlab==4.2.0
+
+# Frontend
+streamlit==1.39.0
+requests==2.32.3
+
