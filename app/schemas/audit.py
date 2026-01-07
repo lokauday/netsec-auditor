@@ -56,3 +56,28 @@ class AuditHistoryResponse(BaseModel):
     items: List[AuditRecordSummary]
     total: int
 
+
+class AuditHistoryItem(BaseModel):
+    """Schema for audit history item with config metadata."""
+    config_id: int
+    filename: str
+    vendor: str
+    device_name: Optional[str] = None
+    environment: Optional[str] = None
+    uploaded_at: datetime
+    risk_score: int
+    total_findings: int
+
+
+class AuditHistoryListResponse(BaseModel):
+    """Response schema for filtered audit history."""
+    items: List[AuditHistoryItem]
+    total: int
+
+
+class AuditSummaryResponse(BaseModel):
+    """Response schema for audit summary/analytics."""
+    total_configs_audited: int
+    findings_by_severity: Dict[str, int]  # {"critical": 10, "high": 5, ...}
+    average_risk_score: float
+    findings_over_time: List[Dict[str, Any]]  # [{"date": "2024-01-01", "critical": 2, "high": 1, ...}, ...]

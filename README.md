@@ -188,6 +188,94 @@ docker-compose down -v
 
 ---
 
+## Cloud Deployment
+
+NetSec Auditor can be deployed to cloud platforms like Railway, Render, or any container-based hosting service.
+
+### Building the Container
+
+Build the Docker image locally:
+
+```bash
+docker build -t netsec-auditor:latest .
+```
+
+Or build with docker-compose:
+
+```bash
+docker-compose build
+```
+
+### Environment Variables
+
+Set these environment variables in your cloud platform:
+
+**Required:**
+- `DATABASE_URL`: PostgreSQL connection string (e.g., `postgresql://user:pass@host:5432/dbname`)
+- `CORS_ORIGINS`: JSON array of allowed origins (e.g., `["https://yourdomain.com"]`)
+
+**Optional:**
+- `API_KEY`: Static API key for authentication (or use database-backed keys via Admin UI)
+- `OPENAI_API_KEY`: OpenAI API key for AI-enhanced analysis
+- `DEBUG`: Set to `false` in production
+- `LOG_LEVEL`: `INFO` or `WARNING` for production
+- `MAX_UPLOAD_SIZE`: Maximum file upload size in bytes (default: 10MB)
+
+### Railway Deployment
+
+1. **Create a new Railway project** and connect your repository
+
+2. **Add PostgreSQL service:**
+   - Add a PostgreSQL database service
+   - Railway will provide `DATABASE_URL` automatically
+
+3. **Deploy the API service:**
+   - Set the **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - Railway sets `$PORT` automatically
+   - Set environment variables as listed above
+
+4. **Deploy Streamlit (optional):**
+   - Create a separate service for Streamlit
+   - Set **Start Command**: `streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0`
+   - Set `BACKEND_URL` environment variable to your API service URL
+
+### Render Deployment
+
+1. **Create a new Web Service** and connect your repository
+
+2. **Configure the service:**
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - Add PostgreSQL database from Render's database service
+
+3. **Set environment variables** in the Render dashboard
+
+4. **For Streamlit:**
+   - Create a separate Web Service
+   - **Start Command**: `streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0`
+   - Set `BACKEND_URL` to your API service URL
+
+### Docker Compose for Production
+
+For self-hosted deployments, use docker-compose:
+
+```bash
+# Set environment variables
+export DATABASE_URL=postgresql://user:pass@host:5432/dbname
+export API_KEY=your-secure-api-key
+export CORS_ORIGINS='["https://yourdomain.com"]'
+
+# Start services
+docker-compose up -d
+```
+
+### Notes
+
+- **Database**: Use managed PostgreSQL (Railway, Render, AWS RDS, etc.) for production
+- **File Storage**: Uploads are stored in the container's filesystem. For production, consider using object storage (S3, etc.)
+- **Streamlit**: Can run locally pointing to the cloud backend, or deploy separately
+- **API Keys**: Use the Admin UI to create database-backed API keys instead of static `API_KEY` for better security
+
 ## Running Backend Locally (Linux/Mac)
 
 For Linux/Mac local development:

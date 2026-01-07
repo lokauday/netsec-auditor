@@ -66,12 +66,66 @@ class AuditService:
         # Run rule-based security checks
         findings = self._run_rule_based_checks(config_file, acls, nat_rules, routes, interfaces)
         
+        # AI analysis flag
+        ai_enabled = False
+        ai_summary_enhancement = ""
+        
         # If OpenAI API key is configured, enhance with AI analysis
         if settings.is_openai_available():
             try:
                 logger.info(f"Running AI-enhanced audit for config file {config_file_id}")
-                ai_findings = self._get_ai_findings(config_file, acls, nat_rules, vpns)
-                findings.extend(ai_findings)
+                
+                # Read raw config for AI analysis
+                from pathlib import Path
+                raw_config_text = ""
+                try:
+                    config_path = Path(config_file.file_path)
+                    if config_path.exists():
+                        raw_config_text = config_path.read_text(encoding='utf-8', errors='ignore')
+                except Exception as e:
+                    logger.warning(f"Could not read config file for AI analysis: {e}")
+                
+                if raw_config_text:
+                    # Build rule-based summary for AI
+                    severity_counts = {
+                        "critical": sum(1 for f in findings if f.severity == "critical"),
+                        "high": sum(1 for f in findings if f.severity == "high"),
+                        "medium": sum(1 for f in findings if f.severity == "medium"),
+                        "low": sum(1 for f in findings if f.severity == "low"),
+                    }
+                    finding_codes = [f.code for f in findings[:10]]
+                    
+                    rule_summary = {
+                        "severity_counts": severity_counts,
+                        "finding_codes": finding_codes,
+                        "total_findings": len(findings),
+                    }
+                    
+                    # Run AI analysis with rule-based context
+                    ai_result = self._run_ai_analysis(
+                        config_text=raw_config_text,
+                        vendor=config_file.vendor.value,
+                        rule_based_summary=rule_summary,
+                        existing_findings=findings,
+                    )
+                    
+                    # Add AI findings
+                    for finding_data in ai_result.get("additional_findings", []):
+                        try:
+                            findings.append(SecurityFinding(
+                                severity=finding_data.get("severity", "low"),
+                                code=finding_data.get("code", "AI_SUGGESTED_ISSUE"),
+                                description=finding_data.get("description", "AI-identified security concern"),
+                                recommendation=finding_data.get("recommendation", "Review and remediate"),
+                                affected_objects=finding_data.get("affected_objects", []),
+                            ))
+                        except Exception as e:
+                            logger.warning(f"Failed to create SecurityFinding from AI data: {e}")
+                    
+                    # Store AI summary enhancement
+                    ai_summary_enhancement = ai_result.get("summary", "")
+                    ai_enabled = True
+                    
             except Exception as e:
                 logger.warning(f"AI analysis failed, continuing with rule-based audit only: {e}")
         else:
@@ -84,8 +138,10 @@ class AuditService:
         risk_score = self._calculate_risk_score(findings)
         breakdown = self._calculate_breakdown(findings)
         
-        # Generate summary
+        # Generate summary (enhance with AI if available)
         summary = self._generate_summary(findings, risk_score)
+        if ai_enabled and ai_summary_enhancement:
+            summary += f"\n\nAI Analysis: {ai_summary_enhancement}"
         
         # Convert findings to dict for response
         findings_dict = [finding.model_dump() if isinstance(finding, SecurityFinding) else finding 
@@ -114,6 +170,7 @@ class AuditService:
             "breakdown": breakdown,
             "summary": summary,
             "findings": findings_dict,
+            "ai_enabled": ai_enabled,
         }
     
     def _run_rule_based_checks(
@@ -761,7 +818,373 @@ class AuditService:
         
         # ========== END PHASE A CHECKS ==========
         
+        # ========== PHASE D: ADDITIONAL SECURITY RULES ==========
+        
+        # D.1: Vendor-Agnostic Rules
+        
+        # MGMT_WEAK_PASSWORD_AUTH (HIGH)
+        if raw_config_text:
+            existing_codes = [f.code for f in findings]
+            if "MGMT_WEAK_PASSWORD_AUTH" not in existing_codes:
+                weak_auth_found = False
+                
+                # IOS: line vty with login but no transport input ssh / or password without AAA
+                if vendor == "cisco_ios":
+                    if "line vty" in combined_text:
+                        lines = raw_config_text.split('\n')
+                        in_vty = False
+                        has_login = False
+                        has_ssh_transport = False
+                        has_aaa = False
+                        
+                        for line in lines:
+                            line_lower = line.strip().lower()
+                            if "line vty" in line_lower:
+                                in_vty = True
+                                has_login = False
+                                has_ssh_transport = False
+                                has_aaa = False
+                            elif in_vty:
+                                if "login" in line_lower and "no login" not in line_lower:
+                                    has_login = True
+                                if "transport input ssh" in line_lower or "transport input telnet ssh" in line_lower:
+                                    has_ssh_transport = True
+                                if "aaa authentication" in line_lower or "aaa authorization" in line_lower:
+                                    has_aaa = True
+                                if line_lower and not line_lower.startswith(' ') and not line_lower.startswith('\t'):
+                                    if "line" not in line_lower:
+                                        # End of vty block
+                                        if has_login and not has_ssh_transport and not has_aaa:
+                                            weak_auth_found = True
+                                            break
+                                        in_vty = False
+                
+                # Fortinet: set admin-auth weak or default
+                elif vendor == "fortinet":
+                    if ('set admin-auth weak' in combined_text or
+                        'set admin-auth default' in combined_text):
+                        weak_auth_found = True
+                
+                if weak_auth_found:
+                    findings.append(SecurityFinding(
+                        severity="high",
+                        code="MGMT_WEAK_PASSWORD_AUTH",
+                        description="Management access allows password-only authentication without key-based auth or AAA enforcement.",
+                        recommendation="Enable key-based authentication (SSH keys) and enforce AAA (Authentication, Authorization, Accounting) for all management access. Disable password-only authentication.",
+                        affected_objects=["Management access configuration"],
+                    ))
+        
+        # PUBLIC_MGMT_INTERFACE (CRITICAL)
+        if raw_config_text:
+            existing_codes = [f.code for f in findings]
+            if "PUBLIC_MGMT_INTERFACE" not in existing_codes:
+                public_mgmt_found = False
+                
+                # Check if management is allowed on public-facing interfaces
+                # ASA/IOS: SSH/HTTP on outside interface or interface with public IP
+                if vendor in ["cisco_asa", "cisco_ios"]:
+                    # Check for SSH/HTTP/Telnet on outside interface
+                    mgmt_patterns = ["ssh", "http", "https", "telnet"]
+                    outside_patterns = ["outside", "external", "internet"]
+                    
+                    for mgmt in mgmt_patterns:
+                        for outside in outside_patterns:
+                            if f"{mgmt} 0.0.0.0 0.0.0.0 {outside}" in combined_text:
+                                public_mgmt_found = True
+                                break
+                        if public_mgmt_found:
+                            break
+                    
+                    # Also check interfaces with public IPs
+                    for interface in interfaces:
+                        if interface.ip_address and not self._is_private_ip(interface.ip_address):
+                            # Public IP interface - check if management is enabled
+                            interface_name_lower = interface.name.lower()
+                            for mgmt in mgmt_patterns:
+                                if f"{mgmt}" in combined_text and interface_name_lower in combined_text:
+                                    # Simple heuristic - if management command references this interface
+                                    public_mgmt_found = True
+                                    break
+                            if public_mgmt_found:
+                                break
+                
+                # Fortinet/Palo: similar logic via management objects
+                elif vendor in ["fortinet", "palo_alto"]:
+                    # Check for management on public interfaces
+                    if ("config system admin" in combined_text or
+                        "set mgmt-interface" in combined_text):
+                        # Check if management interface has public IP
+                        for interface in interfaces:
+                            if interface.ip_address and not self._is_private_ip(interface.ip_address):
+                                if interface.name.lower() in combined_text:
+                                    public_mgmt_found = True
+                                    break
+                
+                if public_mgmt_found:
+                    findings.append(SecurityFinding(
+                        severity="critical",
+                        code="PUBLIC_MGMT_INTERFACE",
+                        description="Management interface is reachable from public networks, exposing administrative access to the internet.",
+                        recommendation="Restrict management access to VPN, out-of-band networks, or specific trusted IP addresses. Never expose management interfaces to public networks.",
+                        affected_objects=["Management interface configuration"],
+                    ))
+        
+        # D.2: Vendor-Specific Rules
+        
+        # ASA: ASA_INSECURE_SERVICE_OBJECT (MEDIUM)
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_INSECURE_SERVICE_OBJECT" not in existing_codes:
+                insecure_services = []
+                insecure_ports = ["telnet", "http", "23", "80"]
+                
+                # Check for service-objects or object-groups using insecure ports
+                lines = raw_config_text.split('\n')
+                in_service_object = False
+                current_service = None
+                
+                for line in lines:
+                    line_lower = line.strip().lower()
+                    if "service-object" in line_lower or "object-group service" in line_lower:
+                        in_service_object = True
+                        # Check for insecure ports
+                        for port in insecure_ports:
+                            if port in line_lower:
+                                if current_service not in insecure_services:
+                                    insecure_services.append(current_service or "service-object")
+                                break
+                    elif in_service_object and line_lower and not (line_lower.startswith(' ') or line_lower.startswith('\t')):
+                        in_service_object = False
+                        current_service = None
+                
+                if insecure_services:
+                    findings.append(SecurityFinding(
+                        severity="medium",
+                        code="ASA_INSECURE_SERVICE_OBJECT",
+                        description=f"Service objects or object-groups reference insecure ports (Telnet, HTTP) that should be replaced with secure alternatives.",
+                        recommendation="Replace Telnet with SSH, HTTP with HTTPS. Use secure protocols for all management and data transmission.",
+                        affected_objects=insecure_services[:5],  # Limit to first 5
+                    ))
+        
+        # IOS: IOS_NO_LOGGING_BUFFERED (LOW/MEDIUM)
+        if vendor == "cisco_ios":
+            existing_codes = [f.code for f in findings]
+            if "IOS_NO_LOGGING_BUFFERED" not in existing_codes:
+                has_logging = False
+                
+                if raw_config_text:
+                    # Check for logging configuration
+                    if ("logging buffered" in combined_text or
+                        "logging host" in combined_text or
+                        "logging trap" in combined_text):
+                        has_logging = True
+                
+                if not has_logging:
+                    findings.append(SecurityFinding(
+                        severity="medium",
+                        code="IOS_NO_LOGGING_BUFFERED",
+                        description="No logging configuration detected. This reduces observability and makes incident response difficult.",
+                        recommendation="Configure logging: 'logging buffered <size>' for local logs and 'logging host <ip>' for syslog server. Enable appropriate log levels.",
+                        affected_objects=["Logging configuration"],
+                    ))
+        
+        # Fortinet: FGT_UNUSED_ADDRESS_OBJECTS (LOW)
+        if vendor == "fortinet":
+            existing_codes = [f.code for f in findings]
+            if "FGT_UNUSED_ADDRESS_OBJECTS" not in existing_codes:
+                # Simple heuristic: find address objects and check if referenced in policies
+                if "config firewall address" in combined_text:
+                    lines = raw_config_text.split('\n')
+                    address_objects = []
+                    in_address_config = False
+                    current_object = None
+                    
+                    for line in lines:
+                        line_lower = line.strip().lower()
+                        if "config firewall address" in line_lower:
+                            in_address_config = True
+                        elif in_address_config and line_lower.startswith("edit "):
+                            # Extract object name
+                            parts = line_lower.split()
+                            if len(parts) > 1:
+                                current_object = parts[1].strip('"')
+                        elif in_address_config and line_lower == "next":
+                            if current_object:
+                                address_objects.append(current_object)
+                                current_object = None
+                        elif in_address_config and line_lower.startswith("end"):
+                            in_address_config = False
+                    
+                    # Check if objects are used in policies
+                    unused_objects = []
+                    for obj in address_objects[:10]:  # Limit check to first 10
+                        # Check if object is referenced in firewall policies
+                        if obj and f'"{obj}"' not in combined_text and f" {obj} " not in combined_text:
+                            # Not found in policy context - might be unused
+                            unused_objects.append(obj)
+                    
+                    if unused_objects:
+                        findings.append(SecurityFinding(
+                            severity="low",
+                            code="FGT_UNUSED_ADDRESS_OBJECTS",
+                            description=f"Address objects {', '.join(unused_objects[:5])} are defined but may not be referenced in firewall policies.",
+                            recommendation="Review and remove unused address objects to reduce configuration complexity. Ensure all defined objects are used in policies.",
+                            affected_objects=unused_objects[:5],
+                        ))
+        
+        # Palo Alto: PA_ZONE_MISMATCH (MEDIUM)
+        if vendor == "palo_alto":
+            existing_codes = [f.code for f in findings]
+            if "PA_ZONE_MISMATCH" not in existing_codes:
+                # Simple heuristic: rules with internal zone to untrusted with broad access
+                if ("rulebase security" in combined_text and
+                    "source-zone" in combined_text and
+                    "destination-zone" in combined_text):
+                    lines = raw_config_text.split('\n')
+                    suspicious_rules = []
+                    
+                    for i, line in enumerate(lines):
+                        line_lower = line.strip().lower()
+                        if "source-zone" in line_lower:
+                            # Check next few lines for destination-zone and action
+                            for j in range(i, min(i+5, len(lines))):
+                                next_line_lower = lines[j].strip().lower()
+                                if "destination-zone untrusted" in next_line_lower or "destination-zone dmz" in next_line_lower:
+                                    # Check for action allow
+                                    for k in range(j, min(j+3, len(lines))):
+                                        if "action allow" in lines[k].strip().lower():
+                                            suspicious_rules.append(f"Rule around line {i+1}")
+                                            break
+                                    break
+                    
+                    if suspicious_rules:
+                        findings.append(SecurityFinding(
+                            severity="medium",
+                            code="PA_ZONE_MISMATCH",
+                            description=f"Security rules may have zone mismatches: internal zones allowing traffic to untrusted/DMZ zones with broad access.",
+                            recommendation="Review zone assignments and ensure rules follow the principle of least privilege. Verify that internal-to-untrusted rules are properly scoped.",
+                            affected_objects=suspicious_rules[:3],
+                        ))
+        
+        # ========== END PHASE D CHECKS ==========
+        
         return findings
+    
+    def _run_ai_analysis(
+        self,
+        config_text: str,
+        vendor: str,
+        rule_based_summary: Dict[str, Any],
+        existing_findings: List[SecurityFinding],
+    ) -> Dict[str, Any]:
+        """
+        Run AI analysis on configuration using OpenAI.
+        
+        Args:
+            config_text: Raw configuration text (may be truncated)
+            vendor: Vendor type
+            rule_based_summary: Summary of rule-based findings
+            existing_findings: List of existing rule-based findings
+            
+        Returns:
+            Dictionary with 'summary' and 'additional_findings' keys
+        """
+        if not settings.is_openai_available():
+            return {"summary": "", "additional_findings": []}
+        
+        try:
+            from openai import OpenAI
+            
+            client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            
+            # Truncate config text if too long (keep first 8000 chars for context)
+            config_truncated = config_text[:8000] if len(config_text) > 8000 else config_text
+            if len(config_text) > 8000:
+                config_truncated += "\n... (truncated)"
+            
+            # Build rule-based summary
+            severity_counts = {
+                "critical": sum(1 for f in existing_findings if f.severity == "critical"),
+                "high": sum(1 for f in existing_findings if f.severity == "high"),
+                "medium": sum(1 for f in existing_findings if f.severity == "medium"),
+                "low": sum(1 for f in existing_findings if f.severity == "low"),
+            }
+            finding_codes = [f.code for f in existing_findings[:10]]  # First 10 codes
+            
+            # Prepare prompt
+            prompt = f"""You are a network security expert analyzing a {vendor} firewall/router configuration.
+
+Rule-based analysis has already identified the following:
+- Critical findings: {severity_counts['critical']}
+- High findings: {severity_counts['high']}
+- Medium findings: {severity_counts['medium']}
+- Low findings: {severity_counts['low']}
+- Finding codes: {', '.join(finding_codes) if finding_codes else 'None'}
+
+Configuration (truncated):
+```
+{config_truncated}
+```
+
+Analyze this configuration and provide:
+1. A 1-2 paragraph summary of overall security posture
+2. Additional security findings that the rule-based engine may have missed
+
+Return JSON in this exact format:
+{{
+    "summary": "1-2 paragraph summary of security posture...",
+    "additional_findings": [
+        {{
+            "severity": "critical|high|medium|low",
+            "code": "AI_SUGGESTED_<DESCRIPTION>",
+            "description": "Detailed description of the issue",
+            "recommendation": "Recommended remediation steps",
+            "affected_objects": ["object1", "object2"]
+        }}
+    ]
+}}
+
+Focus on:
+- Advanced attack vectors
+- Configuration inconsistencies
+- Best practices not covered by rules
+- Vendor-specific security considerations
+- Compliance and governance issues
+"""
+            
+            response = client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a network security expert. Always return valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                response_format={"type": "json_object"} if hasattr(client.chat.completions, "create") else None,
+            )
+            
+            import json
+            content = response.choices[0].message.content
+            
+            # Parse JSON response
+            try:
+                ai_data = json.loads(content)
+            except json.JSONDecodeError:
+                # Try to extract JSON from markdown code blocks
+                json_start = content.find('{')
+                json_end = content.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    ai_data = json.loads(content[json_start:json_end])
+                else:
+                    logger.warning("AI response did not contain valid JSON")
+                    return {"summary": "", "additional_findings": []}
+            
+            return {
+                "summary": ai_data.get("summary", ""),
+                "additional_findings": ai_data.get("additional_findings", [])
+            }
+        except Exception as e:
+            logger.error(f"AI analysis error: {e}", exc_info=True)
+            return {"summary": "", "additional_findings": []}
     
     def _get_ai_findings(
         self,
@@ -774,6 +1197,7 @@ class AuditService:
         Get AI-powered security findings using OpenAI.
         
         This method should only be called if OPENAI_API_KEY is configured.
+        Uses the enhanced _run_ai_analysis method.
         
         Args:
             config_file: Configuration file model
@@ -788,52 +1212,49 @@ class AuditService:
             return []
         
         try:
-            from openai import OpenAI
+            # Read raw config text
+            from pathlib import Path
+            raw_config_text = ""
+            try:
+                config_path = Path(config_file.file_path)
+                if config_path.exists():
+                    raw_config_text = config_path.read_text(encoding='utf-8', errors='ignore')
+            except Exception as e:
+                logger.warning(f"Could not read config file for AI analysis: {e}")
+                return []
             
-            client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            # Get rule-based findings summary (will be passed to AI)
+            # Note: This is called before rule-based findings are complete, so we pass empty list
+            # In practice, AI analysis happens after rule-based, so this is a placeholder
+            rule_summary = {
+                "acls_count": len(acls),
+                "nat_rules_count": len(nat_rules),
+                "vpns_count": len(vpns),
+            }
             
-            # Prepare context for AI
-            context = f"""
-            Analyze the following network security configuration:
-            Vendor: {config_file.vendor.value}
-            ACLs: {len(acls)} rules
-            NAT Rules: {len(nat_rules)} rules
-            VPNs: {len(vpns)} configurations
-            
-            Identify security risks and provide recommendations. Return JSON format:
-            {{
-                "findings": [
-                    {{
-                        "severity": "critical|high|medium|low",
-                        "code": "RISK_CODE",
-                        "description": "Detailed description",
-                        "affected_objects": ["object1", "object2"],
-                        "recommendation": "Recommended fix"
-                    }}
-                ]
-            }}
-            """
-            
-            response = client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a network security expert analyzing firewall and router configurations."},
-                    {"role": "user", "content": context}
-                ],
-                temperature=0.3,
+            # Run AI analysis
+            ai_result = self._run_ai_analysis(
+                config_text=raw_config_text,
+                vendor=config_file.vendor.value,
+                rule_based_summary=rule_summary,
+                existing_findings=[],  # Will be populated in audit_config method
             )
             
-            import json
-            content = response.choices[0].message.content
-            # Try to extract JSON from response
-            json_start = content.find('{')
-            json_end = content.rfind('}') + 1
-            if json_start >= 0 and json_end > json_start:
-                ai_data = json.loads(content[json_start:json_end])
-                findings = []
-                for finding_data in ai_data.get("findings", []):
-                    findings.append(SecurityFinding(**finding_data))
-                return findings
+            # Convert AI findings to SecurityFinding objects
+            findings = []
+            for finding_data in ai_result.get("additional_findings", []):
+                try:
+                    findings.append(SecurityFinding(
+                        severity=finding_data.get("severity", "low"),
+                        code=finding_data.get("code", "AI_SUGGESTED_ISSUE"),
+                        description=finding_data.get("description", "AI-identified security concern"),
+                        recommendation=finding_data.get("recommendation", "Review and remediate"),
+                        affected_objects=finding_data.get("affected_objects", []),
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to create SecurityFinding from AI data: {e}")
+            
+            return findings
         except Exception as e:
             logger.error(f"AI analysis error: {e}", exc_info=True)
         

@@ -17,6 +17,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   api:
     build: .
@@ -28,7 +29,10 @@ services:
       LOG_LEVEL: INFO
       MAX_UPLOAD_SIZE: 10485760
       UPLOAD_DIR: ./uploads
-      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8000"]'
+      CORS_ORIGINS: '["http://localhost:8501","http://localhost:8000"]'
+      # Optional: Set these in production
+      # API_KEY: ${API_KEY}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
       - "8000:8000"
     volumes:
@@ -38,6 +42,22 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    container_name: netsec-auditor-streamlit
+    command: streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    environment:
+      BACKEND_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    restart: unless-stopped
+    volumes:
+      - ./streamlit_app.py:/app/streamlit_app.py
 
 volumes:
   postgres_data:

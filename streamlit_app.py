@@ -7,6 +7,7 @@ import streamlit as st
 import requests
 from io import BytesIO
 from typing import Optional, Dict, Any, List
+from datetime import datetime
 import time
 import os
 import pandas as pd
@@ -28,6 +29,10 @@ if "audit_result" not in st.session_state:
     st.session_state.audit_result = None
 if "config_history" not in st.session_state:
     st.session_state.config_history = []
+if "api_key" not in st.session_state:
+    st.session_state.api_key = None
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
 
 
 # ============= API Client Helpers =============
@@ -46,6 +51,20 @@ def get_api_key() -> Optional[str]:
     return st.session_state.get("api_key", None)
 
 
+def check_admin_status() -> bool:
+    """Check if current user is admin by calling /auth/me endpoint."""
+    try:
+        url = f"{get_base_url()}/api/v1/auth/me"
+        headers = get_headers()
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("is_admin", False)
+    except Exception:
+        pass
+    return False
+
+
 def get_headers() -> Dict[str, str]:
     """Get request headers with API key if available."""
     headers = {}
@@ -53,6 +72,27 @@ def get_headers() -> Dict[str, str]:
     if api_key and api_key.strip():
         headers["X-API-Key"] = api_key.strip()
     return headers
+
+
+def handle_api_error(e: requests.exceptions.RequestException) -> None:
+    """Handle API errors with user-friendly messages."""
+    if isinstance(e, requests.exceptions.HTTPError):
+        if e.response.status_code == 401:
+            st.error("❌ Authentication failed. Please check your API key.")
+        elif e.response.status_code == 403:
+            st.error("❌ Access denied. You don't have permission to perform this action.")
+        elif e.response.status_code == 404:
+            st.error("❌ Resource not found.")
+        elif e.response.status_code >= 500:
+            st.error("❌ Server error. Please try again later.")
+        else:
+            try:
+                error_detail = e.response.json().get("detail", str(e))
+                st.error(f"❌ Error: {error_detail}")
+            except:
+                st.error(f"❌ Error: {str(e)}")
+    else:
+        st.error(f"❌ Request failed: {str(e)}")
 
 
 def upload_config(
@@ -83,6 +123,8 @@ def upload_config(
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
+        if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code in [401, 403]:
+            handle_api_error(e)
         raise Exception(f"Upload failed: {str(e)}")
 
 
@@ -165,6 +207,50 @@ def get_config_audits(config_id: int) -> Dict[str, Any]:
         raise Exception(f"Failed to get audit history: {str(e)}")
 
 
+def get_audit_summary() -> Dict[str, Any]:
+    """Get audit summary/analytics."""
+    url = f"{get_base_url()}/api/v1/audits/summary"
+    headers = get_headers()
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        handle_api_error(e)
+        return {}
+
+
+def get_audit_history(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    vendor: Optional[str] = None,
+    environment: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> Dict[str, Any]:
+    """Get filtered audit history."""
+    url = f"{get_base_url()}/api/v1/audits/history"
+    headers = get_headers()
+    params = {"limit": limit, "offset": offset}
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+    if vendor:
+        params["vendor"] = vendor
+    if environment:
+        params["environment"] = environment
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        handle_api_error(e)
+        return {"items": [], "total": 0}
+
+
 # ============= UI Helper Functions =============
 
 def get_risk_score_color(risk_score: int) -> str:
@@ -209,8 +295,24 @@ with st.sidebar:
         "API Key (Optional)",
         type="password",
         help="API key for authentication (leave empty if not required)",
-        key="api_key"
+        value=st.session_state.get("api_key", ""),
+        key="api_key_input"
     )
+    # Store in session state
+    if api_key:
+        st.session_state.api_key = api_key.strip()
+    else:
+        st.session_state.api_key = None
+    
+    # Check admin status if API key is provided
+    if st.session_state.api_key:
+        try:
+            with st.spinner("Checking permissions..."):
+                st.session_state.is_admin = check_admin_status()
+        except Exception:
+            st.session_state.is_admin = False
+    else:
+        st.session_state.is_admin = False
     
     st.markdown("---")
     st.header("📤 Upload Configuration")
@@ -321,7 +423,12 @@ if st.session_state.config_id and not st.session_state.config_history:
         pass  # Fail silently if history can't be loaded
 
 # Tabs for organization
-tab1, tab2, tab3 = st.tabs(["📊 Overview", "📋 Findings", "📜 History"])
+tab_names = ["📊 Overview", "📋 Findings", "📜 History"]
+if st.session_state.is_admin:
+    tab_names.append("🔐 Admin: API Keys")
+tabs = st.tabs(tab_names)
+tab1, tab2, tab3 = tabs[0], tabs[1], tabs[2]
+tab_admin = tabs[3] if st.session_state.is_admin else None
 
 with tab1:
     # Section 1: Current Config
@@ -500,26 +607,93 @@ with tab2:
         st.info("👈 Upload and analyze a configuration file to see findings")
 
 with tab3:
-    # Section 4: Recent History
-    st.header("📜 Configuration History")
+    # Section 4: Enhanced History with Filters and Analytics
+    st.header("📜 Audit History & Analytics")
     
+    # Filters section
+    with st.expander("🔍 Filters", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            start_date = st.date_input("Start Date", value=None)
+        with col2:
+            end_date = st.date_input("End Date", value=None)
+        with col3:
+            vendor_options = ["All"] + ["cisco_asa", "cisco_ios", "fortinet", "palo_alto"]
+            selected_vendor = st.selectbox("Vendor", options=vendor_options, index=0)
+        with col4:
+            environment_options = ["All", "Prod", "Dev", "Test", "DMZ", "Other"]
+            selected_environment = st.selectbox("Environment", options=environment_options, index=0)
+    
+    # Get audit summary for charts
     try:
-        history_result = list_configs(limit=20)
+        summary_data = get_audit_summary()
+        
+        if summary_data:
+            # Charts section
+            st.subheader("📊 Analytics Overview")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Configs Audited", summary_data.get("total_configs_audited", 0))
+            with col2:
+                st.metric("Average Risk Score", f"{summary_data.get('average_risk_score', 0):.1f}")
+            with col3:
+                total_findings = sum(summary_data.get("findings_by_severity", {}).values())
+                st.metric("Total Findings", total_findings)
+            
+            # Risk score over time chart
+            if summary_data.get("findings_over_time"):
+                st.subheader("📈 Findings Over Time")
+                time_data = summary_data["findings_over_time"]
+                if time_data:
+                    chart_df = pd.DataFrame(time_data)
+                    chart_df["date"] = pd.to_datetime(chart_df["date"])
+                    chart_df = chart_df.set_index("date")
+                    st.line_chart(chart_df[["critical", "high", "medium", "low"]])
+            
+            # Findings by severity bar chart
+            st.subheader("📊 Findings by Severity (All Time)")
+            severity_data = summary_data.get("findings_by_severity", {})
+            if severity_data:
+                severity_df = pd.DataFrame({
+                    "Severity": list(severity_data.keys()),
+                    "Count": list(severity_data.values())
+                })
+                st.bar_chart(severity_df.set_index("Severity"))
+        
+        st.markdown("---")
+        
+        # Get filtered audit history
+        history_params = {}
+        if start_date:
+            history_params["start_date"] = start_date.isoformat()
+        if end_date:
+            history_params["end_date"] = end_date.isoformat()
+        if selected_vendor != "All":
+            history_params["vendor"] = selected_vendor
+        if selected_environment != "All":
+            history_params["environment"] = selected_environment
+        
+        history_result = get_audit_history(**history_params, limit=100)
         
         if history_result and "items" in history_result and history_result["items"]:
-            configs = history_result["items"]
+            audits = history_result["items"]
+            
+            st.subheader(f"📋 Audit History ({history_result.get('total', 0)} total)")
             
             # Create DataFrame
             history_data = []
-            for config in configs:
+            for audit in audits:
                 history_data.append({
-                    "Config ID": config.get("id"),
-                    "Filename": config.get("filename", "N/A"),
-                    "Vendor": config.get("vendor", "N/A").upper(),
-                    "Device Name": config.get("device_name", "N/A"),
-                    "Environment": config.get("environment", "N/A"),
-                    "Uploaded": config.get("created_at", "N/A")[:19] if config.get("created_at") else "N/A",
-                    "Parsed": "✅" if config.get("has_parsed_data") else "❌"
+                    "Config ID": audit.get("config_id"),
+                    "Filename": audit.get("filename", "N/A"),
+                    "Vendor": audit.get("vendor", "N/A").upper(),
+                    "Device Name": audit.get("device_name", "N/A"),
+                    "Environment": audit.get("environment", "N/A"),
+                    "Uploaded": audit.get("uploaded_at", "N/A")[:19] if audit.get("uploaded_at") else "N/A",
+                    "Risk Score": audit.get("risk_score", 0),
+                    "Total Findings": audit.get("total_findings", 0)
                 })
             
             df_history = pd.DataFrame(history_data)
@@ -528,11 +702,24 @@ with tab3:
             st.dataframe(
                 df_history,
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+                height=400
             )
             
+            # CSV export
+            csv = df_history.to_csv(index=False)
+            st.download_button(
+                "📥 Download CSV",
+                data=csv,
+                file_name=f"audit_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+            st.markdown("---")
+            
             # Config selector
-            config_options = {f"{c.get('id')} - {c.get('filename', 'N/A')}": c.get("id") for c in configs}
+            config_options = {f"{a.get('config_id')} - {a.get('filename', 'N/A')}": a.get("config_id") for a in audits}
             selected_config_label = st.selectbox(
                 "Select a configuration to load:",
                 options=[""] + list(config_options.keys()),
@@ -553,8 +740,6 @@ with tab3:
                             try:
                                 audit_history = get_config_audits(selected_config_id)
                                 if audit_history and "audits" in audit_history and audit_history["audits"]:
-                                    # Get latest audit
-                                    latest_audit = audit_history["audits"][0]
                                     st.info(f"Config {selected_config_id} loaded. Click 'Re-run Audit' to see results.")
                             except Exception:
                                 st.info(f"Config {selected_config_id} loaded. Run audit to see results.")
@@ -563,10 +748,142 @@ with tab3:
                     except Exception as e:
                         st.error(f"Failed to load config: {str(e)}")
         else:
-            st.info("No configuration history found")
+            st.info("No audit history found with the selected filters")
             
     except Exception as e:
         st.error(f"Failed to load history: {str(e)}")
+
+# Admin tab
+if tab_admin:
+    with tab_admin:
+        st.header("🔐 API Key Management")
+        st.markdown("Manage API keys for authentication and access control.")
+        
+        # Helper functions for API key management
+        def list_api_keys() -> Dict[str, Any]:
+            """List all API keys."""
+            url = f"{get_base_url()}/api/v1/api-keys/"
+            headers = get_headers()
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                handle_api_error(e)
+                return {"items": [], "total": 0}
+        
+        def create_api_key(name: str, role: str) -> Dict[str, Any]:
+            """Create a new API key."""
+            url = f"{get_base_url()}/api/v1/api-keys/"
+            headers = get_headers()
+            try:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json={"name": name, "role": role},
+                    timeout=10
+                )
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                handle_api_error(e)
+                return {}
+        
+        def deactivate_api_key(key_id: int) -> bool:
+            """Deactivate an API key."""
+            url = f"{get_base_url()}/api/v1/api-keys/{key_id}/deactivate"
+            headers = get_headers()
+            try:
+                response = requests.patch(url, headers=headers, timeout=10)
+                response.raise_for_status()
+                return True
+            except requests.exceptions.RequestException as e:
+                handle_api_error(e)
+                return False
+        
+        # Section 1: List existing keys
+        st.subheader("📋 Existing API Keys")
+        
+        if st.button("🔄 Refresh List", use_container_width=False):
+            st.rerun()
+        
+        keys_data = list_api_keys()
+        
+        if keys_data.get("items"):
+            keys_df_data = []
+            for key in keys_data["items"]:
+                keys_df_data.append({
+                    "ID": key.get("id"),
+                    "Name": key.get("name", "N/A"),
+                    "Role": key.get("role", "N/A"),
+                    "Status": "✅ Active" if key.get("is_active") else "❌ Inactive",
+                    "Created": key.get("created_at", "N/A")[:19] if key.get("created_at") else "N/A",
+                    "Key (Masked)": key.get("key_masked", "N/A")
+                })
+            
+            keys_df = pd.DataFrame(keys_df_data)
+            st.dataframe(keys_df, use_container_width=True, hide_index=True)
+            
+            # Deactivate key section
+            st.subheader("🗑️ Deactivate Key")
+            key_ids = [k.get("id") for k in keys_data["items"] if k.get("is_active")]
+            if key_ids:
+                selected_key_id = st.selectbox(
+                    "Select key to deactivate:",
+                    options=key_ids,
+                    format_func=lambda x: f"ID {x} - {next((k.get('name', 'N/A') for k in keys_data['items'] if k.get('id') == x), 'N/A')}"
+                )
+                
+                if st.button("⚠️ Deactivate Selected Key", type="secondary"):
+                    if deactivate_api_key(selected_key_id):
+                        st.success(f"✅ Key {selected_key_id} deactivated successfully")
+                        st.rerun()
+            else:
+                st.info("No active keys to deactivate")
+        else:
+            st.info("No API keys found")
+        
+        st.markdown("---")
+        
+        # Section 2: Create new key
+        st.subheader("➕ Create New API Key")
+        
+        with st.form("create_api_key_form"):
+            new_key_name = st.text_input("Key Name/Label", help="A descriptive name for this API key")
+            new_key_role = st.selectbox(
+                "Role",
+                options=["read_only", "admin"],
+                help="read_only: Can read/list resources. admin: Full access including key management."
+            )
+            
+            submitted = st.form_submit_button("🔑 Create API Key", use_container_width=True)
+            
+            if submitted:
+                if not new_key_name or not new_key_name.strip():
+                    st.error("⚠️ Please provide a key name")
+                else:
+                    with st.spinner("Creating API key..."):
+                        result = create_api_key(new_key_name.strip(), new_key_role)
+                        if result and "key" in result:
+                            st.success("✅ API key created successfully!")
+                            st.markdown("### 🔑 **Your New API Key**")
+                            st.code(result["key"], language=None)
+                            st.warning("⚠️ **Important:** Copy this key now. It will not be shown again!")
+                            
+                            # Copy button using session state
+                            if st.button("📋 Copy to Clipboard", use_container_width=True):
+                                st.info("Key copied! (Use Ctrl+C if button doesn't work)")
+                            
+                            st.markdown("---")
+                            st.json({
+                                "id": result.get("id"),
+                                "name": result.get("name"),
+                                "role": result.get("role"),
+                                "is_active": result.get("is_active"),
+                                "created_at": result.get("created_at")
+                            })
+                        else:
+                            st.error("❌ Failed to create API key")
 
 # Footer
 st.markdown("---")
