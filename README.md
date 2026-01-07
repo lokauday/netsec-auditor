@@ -92,8 +92,18 @@ NetSec Auditor can be deployed to Railway using the provided `railway.json` conf
 
 3. **Environment variables:**
    - `DATABASE_URL`: Automatically set by Railway from PostgreSQL plugin
-   - `API_KEY`: Set to your secure API key (default: `changeme_static_demo_key` - **change this!**)
+   - `API_KEY`: Set to your secure API key in Railway dashboard (required - no default)
    - `OPENAI_API_KEY`: (Optional) Your OpenAI API key for AI-enhanced audit mode
+
+### Railway Deployment – Database Env
+
+The API automatically detects the database connection string in this order:
+
+1. `DATABASE_URL` (Railway Postgres connection string)
+2. `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (Railway plugin vars)
+3. Local docker-compose defaults (`POSTGRES_*` / `db:5432`)
+
+On Railway, make sure the Postgres plugin is attached and `DATABASE_URL` is available to the `netsec-auditor-api` service.
 
 4. **Access your deployed API:**
    - Railway provides a public URL (e.g., `https://netsec-auditor-api.up.railway.app`)

@@ -6,10 +6,13 @@ Uses SQLAlchemy 2.x style with DeclarativeBase for Python 3.13 compatibility.
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-from app.core.config import settings
+from app.core.config import get_settings
 
-# Get database URL (defaults to SQLite for local development)
-database_url = settings.get_database_url()
+settings = get_settings()
+
+# Get database URL with priority: DATABASE_URL > PG* vars > docker-compose > SQLite
+SQLALCHEMY_DATABASE_URL = settings.sqlalchemy_database_uri
+database_url = SQLALCHEMY_DATABASE_URL
 
 # Connection arguments for SQLite
 connect_args = {}

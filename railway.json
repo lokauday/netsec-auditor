@@ -37,8 +37,7 @@
         "DATABASE_URL": {
           "fromPlugin": "postgresql",
           "property": "connectionString"
-        },
-        "API_KEY": "changeme_static_demo_key"
+        }
       }
     }
   ]
