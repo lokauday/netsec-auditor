@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.auth import verify_api_key
+from app.core.auth import require_role
 from app.models.config_file import ConfigFile
 from app.models.audit_record import AuditRecord
 from app.services.audit_service import AuditService
@@ -24,7 +24,7 @@ router = APIRouter()
 @router.post("/{config_file_id}", response_model=AuditResponse)
 async def audit_config_file(
     config_file_id: int,
-    api_key: str = Security(verify_api_key),
+    _client = Depends(require_role("read_only")),
     db: Session = Depends(get_db)
 ):
     """
@@ -63,7 +63,7 @@ async def audit_config_file(
 @router.get("/{config_file_id}/report")
 async def get_audit_report(
     config_file_id: int,
-    api_key: str = Security(verify_api_key),
+    _client = Depends(require_role("read_only")),
     db: Session = Depends(get_db)
 ):
     """

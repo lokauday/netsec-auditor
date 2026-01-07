@@ -6,8 +6,10 @@ Connects to the FastAPI backend to upload, parse, and audit network configuratio
 import streamlit as st
 import requests
 from io import BytesIO
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import time
+import os
+import pandas as pd
 
 # Page config
 st.set_page_config(
@@ -20,33 +22,50 @@ st.set_page_config(
 # Initialize session state
 if "config_id" not in st.session_state:
     st.session_state.config_id = None
+if "current_config" not in st.session_state:
+    st.session_state.current_config = None
 if "audit_result" not in st.session_state:
     st.session_state.audit_result = None
-if "last_error" not in st.session_state:
-    st.session_state.last_error = None
+if "config_history" not in st.session_state:
+    st.session_state.config_history = []
 
 
-def get_headers(api_key: Optional[str] = None) -> Dict[str, str]:
-    """Get request headers with optional API key."""
+# ============= API Client Helpers =============
+
+def get_base_url() -> str:
+    """Get backend base URL from session state, environment, or default."""
+    # Check session state first (set from sidebar)
+    if "backend_url" in st.session_state:
+        return st.session_state.backend_url
+    # Fall back to environment variable
+    return os.getenv("BACKEND_URL", "http://localhost:8000")
+
+
+def get_api_key() -> Optional[str]:
+    """Get API key from session state (set in sidebar)."""
+    return st.session_state.get("api_key", None)
+
+
+def get_headers() -> Dict[str, str]:
+    """Get request headers with API key if available."""
     headers = {}
+    api_key = get_api_key()
     if api_key and api_key.strip():
         headers["X-API-Key"] = api_key.strip()
     return headers
 
 
 def upload_config(
-    base_url: str,
     file: BytesIO,
     filename: str,
     device_name: Optional[str] = None,
     device_ip: Optional[str] = None,
     environment: Optional[str] = None,
-    location: Optional[str] = None,
-    api_key: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
+    location: Optional[str] = None
+) -> Dict[str, Any]:
     """Upload configuration file to backend."""
-    url = f"{base_url}/api/v1/upload/"
-    headers = get_headers(api_key)
+    url = f"{get_base_url()}/api/v1/upload/"
+    headers = get_headers()
     
     files = {"file": (filename, file, "text/plain")}
     data = {}
@@ -64,315 +83,490 @@ def upload_config(
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        raise Exception(f"Upload failed: {e}")
+        raise Exception(f"Upload failed: {str(e)}")
 
 
-def parse_config(base_url: str, config_id: int, api_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def parse_config(config_id: int) -> Dict[str, Any]:
     """Parse uploaded configuration."""
-    url = f"{base_url}/api/v1/upload/{config_id}/parse"
-    headers = get_headers(api_key)
+    url = f"{get_base_url()}/api/v1/upload/{config_id}/parse"
+    headers = get_headers()
     
     try:
         response = requests.post(url, headers=headers, timeout=60)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        raise Exception(f"Parse failed: {e}")
+        raise Exception(f"Parse failed: {str(e)}")
 
 
-def audit_config(base_url: str, config_id: int, api_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def run_audit(config_id: int) -> Dict[str, Any]:
     """Run security audit on parsed configuration."""
-    url = f"{base_url}/api/v1/audit/{config_id}"
-    headers = get_headers(api_key)
+    url = f"{get_base_url()}/api/v1/audit/{config_id}"
+    headers = get_headers()
     
     try:
         response = requests.post(url, headers=headers, timeout=120)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        raise Exception(f"Audit failed: {e}")
+        raise Exception(f"Audit failed: {str(e)}")
 
 
-def get_pdf_report(base_url: str, config_id: int, api_key: Optional[str] = None) -> Optional[BytesIO]:
+def get_config_detail(config_id: int) -> Dict[str, Any]:
+    """Get detailed information about a configuration."""
+    url = f"{get_base_url()}/api/v1/configs/{config_id}"
+    headers = get_headers()
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Failed to get config details: {str(e)}")
+
+
+def get_audit_report_pdf(config_id: int) -> BytesIO:
     """Download PDF audit report."""
-    url = f"{base_url}/api/v1/audit/{config_id}/report"
-    headers = get_headers(api_key)
+    url = f"{get_base_url()}/api/v1/audit/{config_id}/report"
+    headers = get_headers()
     
     try:
         response = requests.get(url, headers=headers, timeout=60, stream=True)
         response.raise_for_status()
         return BytesIO(response.content)
     except requests.exceptions.RequestException as e:
-        raise Exception(f"PDF download failed: {e}")
+        raise Exception(f"PDF download failed: {str(e)}")
 
 
-def format_risk_score_color(risk_score: int) -> str:
-    """Get color for risk score."""
-    if risk_score >= 70:
-        return "🔴"
-    elif risk_score >= 40:
-        return "🟠"
+def list_configs(limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+    """List configuration files with pagination."""
+    url = f"{get_base_url()}/api/v1/configs/"
+    headers = get_headers()
+    params = {"limit": limit, "offset": offset}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Failed to list configs: {str(e)}")
+
+
+def get_config_audits(config_id: int) -> Dict[str, Any]:
+    """Get audit history for a configuration."""
+    url = f"{get_base_url()}/api/v1/configs/{config_id}/audits"
+    headers = get_headers()
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Failed to get audit history: {str(e)}")
+
+
+# ============= UI Helper Functions =============
+
+def get_risk_score_color(risk_score: int) -> str:
+    """Get color name for risk score."""
+    if risk_score <= 20:
+        return "green"
+    elif risk_score <= 50:
+        return "yellow"
+    elif risk_score <= 80:
+        return "orange"
     else:
-        return "🟢"
+        return "red"
 
 
-# Sidebar - Settings
+def format_severity_badge(severity: str) -> str:
+    """Format severity as colored badge."""
+    colors = {
+        "critical": "🔴",
+        "high": "🟠",
+        "medium": "🟡",
+        "low": "🔵"
+    }
+    emoji = colors.get(severity.lower(), "⚪")
+    return f"{emoji} {severity.upper()}"
+
+
+# ============= Sidebar =============
+
 with st.sidebar:
     st.header("⚙️ Settings")
     
-    api_base_url = st.text_input(
-        "API Base URL",
-        value="http://localhost:8000",
-        help="Base URL of the FastAPI backend"
+    backend_url = st.text_input(
+        "Backend URL",
+        value=get_base_url(),
+        help="Base URL of the FastAPI backend",
+        key="backend_url"
     )
+    if backend_url != get_base_url():
+        os.environ["BACKEND_URL"] = backend_url
     
     api_key = st.text_input(
-        "API Key",
+        "API Key (Optional)",
         type="password",
-        help="API key for authentication (optional, leave empty if not required)",
-        value=""
+        help="API key for authentication (leave empty if not required)",
+        key="api_key"
     )
     
     st.markdown("---")
-    st.markdown("### 📚 Help")
-    st.markdown("""
-    1. Upload a network configuration file (.txt)
-    2. Fill in optional device metadata
-    3. Click "Upload → Parse → Audit"
-    4. Review results and download PDF report
-    """)
-
-
-# Main UI
-st.title("🛡️ NetSec Auditor — Security Dashboard")
-st.markdown("Upload, parse, and audit network security configurations")
-
-# Create two columns for left and right panels
-col1, col2 = st.columns([1, 1])
-
-with col1:
     st.header("📤 Upload Configuration")
     
     uploaded_file = st.file_uploader(
         "Choose a configuration file",
         type=["txt"],
-        help="Upload router/firewall configuration file (Cisco ASA, IOS, Fortinet, Palo Alto)"
+        help="Upload router/firewall configuration file (up to 200MB)",
+        key="uploaded_file"
     )
     
     st.markdown("#### Device Metadata (Optional)")
     
-    device_name = st.text_input("Device Name", value="")
-    device_ip = st.text_input("Device IP Address", value="")
+    device_name = st.text_input("Device Name", key="device_name")
+    device_ip = st.text_input("Device IP Address", key="device_ip")
     
     environment = st.selectbox(
         "Environment",
-        options=["", "prod", "dev", "lab", "test"],
-        format_func=lambda x: "Select environment..." if x == "" else x.upper(),
-        index=0
+        options=["", "Prod", "Dev", "Test", "DMZ", "Other"],
+        index=0,
+        key="environment"
     )
     
-    location = st.text_input("Location", value="")
+    location = st.text_input("Location", key="location")
     
-    # Upload, Parse, Audit button
-    if st.button("🚀 Upload → Parse → Audit", type="primary", use_container_width=True):
+    # Upload & Analyze button
+    if st.button("🚀 Upload & Analyze", type="primary", use_container_width=True):
         if not uploaded_file:
             st.error("⚠️ Please upload a configuration file first")
         else:
             try:
-                # Reset state
-                st.session_state.last_error = None
-                
-                # Step 1: Upload
-                with st.spinner("📤 Uploading configuration..."):
-                    file_bytes = BytesIO(uploaded_file.read())
-                    upload_result = upload_config(
-                        api_base_url,
-                        file_bytes,
-                        uploaded_file.name,
-                        device_name if device_name else None,
-                        device_ip if device_ip else None,
-                        environment if environment else None,
-                        location if location else None,
-                        api_key if api_key else None
-                    )
+                # Validate file size (200MB limit)
+                file_bytes = BytesIO(uploaded_file.read())
+                file_size = len(file_bytes.getvalue())
+                if file_size > 200 * 1024 * 1024:
+                    st.error("⚠️ File size exceeds 200MB limit")
+                else:
+                    file_bytes.seek(0)  # Reset to beginning
                     
-                    if not upload_result or "id" not in upload_result:
-                        raise Exception("Upload failed: Invalid response from server")
+                    # Upload
+                    with st.spinner("📤 Uploading configuration..."):
+                        upload_result = upload_config(
+                            file_bytes,
+                            uploaded_file.name,
+                            device_name if device_name else None,
+                            device_ip if device_ip else None,
+                            environment if environment else None,
+                            location if location else None
+                        )
+                        
+                        if not upload_result or "id" not in upload_result:
+                            raise Exception("Upload failed: Invalid response")
+                        
+                        config_id = upload_result["id"]
+                        st.session_state.config_id = config_id
+                        
+                        # Get full config details
+                        config_detail = get_config_detail(config_id)
+                        st.session_state.current_config = config_detail
                     
-                    config_id = upload_result["id"]
-                    st.session_state.config_id = config_id
-                    st.success(f"✅ Uploaded! Config ID: {config_id}")
-                
-                # Step 2: Parse
-                with st.spinner("🔍 Parsing configuration..."):
-                    parse_result = parse_config(api_base_url, config_id, api_key if api_key else None)
-                    if not parse_result or not parse_result.get("parsed"):
-                        raise Exception("Parse failed: Configuration could not be parsed")
-                    st.success("✅ Parsed successfully!")
-                
-                # Step 3: Audit
-                with st.spinner("🔒 Running security audit..."):
-                    audit_result = audit_config(api_base_url, config_id, api_key if api_key else None)
-                    if not audit_result:
-                        raise Exception("Audit failed: No results returned")
+                    # Parse
+                    with st.spinner("🔍 Parsing configuration..."):
+                        parse_result = parse_config(config_id)
+                        if not parse_result or not parse_result.get("parsed"):
+                            raise Exception("Parse failed: Configuration could not be parsed")
+                        
+                        # Refresh config details after parse
+                        config_detail = get_config_detail(config_id)
+                        st.session_state.current_config = config_detail
                     
-                    st.session_state.audit_result = audit_result
-                    st.success("✅ Audit complete!")
-                
-                # Trigger rerun to show results
-                st.rerun()
-                
+                    # Audit
+                    with st.spinner("🔒 Running security audit..."):
+                        audit_result = run_audit(config_id)
+                        if not audit_result:
+                            raise Exception("Audit failed: No results returned")
+                        
+                        st.session_state.audit_result = audit_result
+                    
+                    st.success("✅ Analysis complete!")
+                    st.rerun()
+                    
             except Exception as e:
-                error_msg = str(e)
-                st.session_state.last_error = error_msg
-                st.error(f"❌ Error: {error_msg}")
+                st.error(f"❌ Error: {str(e)}")
     
-    # Display last error if any
-    if st.session_state.last_error:
-        st.error(f"❌ Last Error: {st.session_state.last_error}")
-    
-    # Show current config ID if available
-    if st.session_state.config_id:
-        st.info(f"📄 Current Config ID: {st.session_state.config_id}")
+    st.markdown("---")
+    st.markdown("### 📚 Help")
+    st.markdown("""
+    1. Upload a network configuration file (.txt)
+    2. Optionally fill in device metadata
+    3. Click "Upload & Analyze"
+    4. Review results in the main area
+    5. Download PDF report if needed
+    """)
 
 
-with col2:
-    st.header("📊 Audit Results")
+# ============= Main Area =============
+
+st.title("🛡️ NetSec Auditor — Security Dashboard")
+st.markdown("Upload, parse, and audit network security configurations")
+
+# Load config history if available
+if st.session_state.config_id and not st.session_state.config_history:
+    try:
+        history = list_configs(limit=10)
+        if history and "items" in history:
+            st.session_state.config_history = history["items"]
+    except Exception:
+        pass  # Fail silently if history can't be loaded
+
+# Tabs for organization
+tab1, tab2, tab3 = st.tabs(["📊 Overview", "📋 Findings", "📜 History"])
+
+with tab1:
+    # Section 1: Current Config
+    if st.session_state.config_id and st.session_state.current_config:
+        st.header("📄 Current Configuration")
+        
+        config = st.session_state.current_config
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Config ID", config.get("id", "N/A"))
+            st.metric("Vendor", config.get("vendor", "N/A").upper())
+        
+        with col2:
+            st.metric("Device Name", config.get("device_name", "N/A"))
+            st.metric("Environment", config.get("environment", "N/A"))
+        
+        with col3:
+            st.metric("Device IP", config.get("device_ip", "N/A"))
+            st.metric("Location", config.get("location", "N/A"))
+        
+        # Action buttons
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
+        
+        with btn_col1:
+            if st.button("🔄 Re-run Parse", use_container_width=True):
+                try:
+                    with st.spinner("Parsing..."):
+                        parse_result = parse_config(st.session_state.config_id)
+                        st.success("✅ Parse complete!")
+                        config_detail = get_config_detail(st.session_state.config_id)
+                        st.session_state.current_config = config_detail
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Parse failed: {str(e)}")
+        
+        with btn_col2:
+            if st.button("🔒 Re-run Audit", use_container_width=True):
+                try:
+                    with st.spinner("Running audit..."):
+                        audit_result = run_audit(st.session_state.config_id)
+                        st.session_state.audit_result = audit_result
+                        st.success("✅ Audit complete!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Audit failed: {str(e)}")
+        
+        with btn_col3:
+            try:
+                pdf_bytes = get_audit_report_pdf(st.session_state.config_id)
+                st.download_button(
+                    "📄 Download PDF Report",
+                    data=pdf_bytes.getvalue(),
+                    file_name=f"netsec_audit_{st.session_state.config_id}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.button("📄 Download PDF Report", disabled=True, use_container_width=True)
+                st.caption(f"PDF not available: {str(e)}")
+        
+        st.markdown("---")
     
+    # Section 2: Risk Overview
     if st.session_state.audit_result:
+        st.header("📊 Risk Overview")
+        
         audit_result = st.session_state.audit_result
-        
-        # Risk Score
         risk_score = audit_result.get("risk_score", 0)
-        risk_emoji = format_risk_score_color(risk_score)
+        risk_color = get_risk_score_color(risk_score)
         
-        st.markdown("### Risk Assessment")
-        st.metric(
-            label=f"{risk_emoji} Risk Score",
-            value=f"{risk_score}/100",
-            delta=None
-        )
+        # Risk Score Metric
+        col1, col2 = st.columns([1, 2])
         
-        # Breakdown
-        breakdown = audit_result.get("breakdown", {})
-        if breakdown:
-            st.markdown("#### Severity Breakdown")
-            breakdown_cols = st.columns(4)
-            
-            with breakdown_cols[0]:
-                st.metric("🔴 Critical", breakdown.get("critical", 0))
-            with breakdown_cols[1]:
-                st.metric("🟠 High", breakdown.get("high", 0))
-            with breakdown_cols[2]:
-                st.metric("🟡 Medium", breakdown.get("medium", 0))
-            with breakdown_cols[3]:
-                st.metric("🔵 Low", breakdown.get("low", 0))
+        with col1:
+            st.metric(
+                label="Risk Score",
+                value=f"{risk_score}/100",
+                delta=None
+            )
+            # Color indicator
+            color_hex = {
+                "green": "#28a745",
+                "yellow": "#ffc107",
+                "orange": "#fd7e14",
+                "red": "#dc3545"
+            }[risk_color]
+            st.markdown(
+                f'<div style="width: 100%; height: 20px; background-color: {color_hex}; border-radius: 5px;"></div>',
+                unsafe_allow_html=True
+            )
         
-        # Total Findings
-        total_findings = audit_result.get("total_findings", 0)
-        st.markdown(f"**Total Findings:** {total_findings}")
+        with col2:
+            # Severity Breakdown Chart
+            breakdown = audit_result.get("breakdown", {})
+            if breakdown:
+                severity_data = {
+                    "Critical": breakdown.get("critical", 0),
+                    "High": breakdown.get("high", 0),
+                    "Medium": breakdown.get("medium", 0),
+                    "Low": breakdown.get("low", 0)
+                }
+                
+                # Create bar chart using Streamlit native charting
+                chart_df = pd.DataFrame({
+                    "Severity": list(severity_data.keys()),
+                    "Count": list(severity_data.values())
+                })
+                st.bar_chart(chart_df.set_index("Severity"), height=300)
+                
+                # Also show counts as metrics
+                metric_cols = st.columns(4)
+                with metric_cols[0]:
+                    st.metric("🔴 Critical", severity_data["Critical"])
+                with metric_cols[1]:
+                    st.metric("🟠 High", severity_data["High"])
+                with metric_cols[2]:
+                    st.metric("🟡 Medium", severity_data["Medium"])
+                with metric_cols[3]:
+                    st.metric("🔵 Low", severity_data["Low"])
         
         # Summary
         summary = audit_result.get("summary", "")
         if summary:
-            st.markdown("#### Executive Summary")
-            st.info(summary)
-        
-        # Findings List
-        findings = audit_result.get("findings", [])
-        if findings:
-            st.markdown("#### Security Findings")
-            
-            # Group findings by severity
-            severity_groups = {
-                "critical": [],
-                "high": [],
-                "medium": [],
-                "low": []
-            }
-            
-            for finding in findings:
-                severity = finding.get("severity", "low").lower()
-                if severity in severity_groups:
-                    severity_groups[severity].append(finding)
-            
-            # Display findings by severity
-            severity_order = ["critical", "high", "medium", "low"]
-            severity_emojis = {
-                "critical": "🔴",
-                "high": "🟠",
-                "medium": "🟡",
-                "low": "🔵"
-            }
-            
-            for severity in severity_order:
-                group_findings = severity_groups[severity]
-                if group_findings:
-                    st.markdown(f"##### {severity_emojis[severity]} {severity.upper()} SEVERITY ({len(group_findings)})")
-                    
-                    for idx, finding in enumerate(group_findings, 1):
-                        with st.expander(
-                            f"**{finding.get('code', 'N/A')}** - {finding.get('severity', 'unknown').upper()}",
-                            expanded=(severity in ["critical", "high"])
-                        ):
-                            st.markdown(f"**Description:**")
-                            st.write(finding.get("description", "No description provided."))
-                            
-                            affected_objects = finding.get("affected_objects", [])
-                            if affected_objects:
-                                st.markdown(f"**Affected Objects:**")
-                                st.write(", ".join(affected_objects))
-                            
-                            st.markdown(f"**Recommendation:**")
-                            st.success(finding.get("recommendation", "No recommendation provided."))
-        
-        # PDF Download Button
-        if st.session_state.config_id:
-            st.markdown("---")
-            try:
-                pdf_bytes = get_pdf_report(
-                    api_base_url,
-                    st.session_state.config_id,
-                    api_key if api_key else None
-                )
-                
-                if pdf_bytes:
-                    st.download_button(
-                        label="📄 Download PDF Report",
-                        data=pdf_bytes.getvalue(),
-                        file_name=f"netsec_audit_{st.session_state.config_id}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        type="primary"
-                    )
-            except Exception as e:
-                st.warning(f"⚠️ PDF download not available: {e}")
-        
+            st.info(f"**Summary:** {summary}")
+    
     else:
-        st.info("👈 Upload and audit a configuration file to see results here")
-        
-        # Show example structure
-        with st.expander("📋 Example Output Structure"):
-            st.json({
-                "risk_score": 65,
-                "total_findings": 3,
-                "breakdown": {
-                    "critical": 1,
-                    "high": 1,
-                    "medium": 1,
-                    "low": 0
-                },
-                "summary": "Found 3 security findings...",
-                "findings": [
-                    {
-                        "severity": "critical",
-                        "code": "ACL_ANY_ANY_INBOUND",
-                        "description": "Inbound ACL allows any-to-any traffic",
-                        "recommendation": "Restrict ACL rules to specific sources and destinations"
-                    }
-                ]
-            })
+        st.info("👈 Upload and analyze a configuration file to see risk overview")
 
+with tab2:
+    # Section 3: Findings Table
+    if st.session_state.audit_result:
+        st.header("🔍 Security Findings")
+        
+        audit_result = st.session_state.audit_result
+        findings = audit_result.get("findings", [])
+        
+        if findings:
+            # Severity filter
+            all_severities = ["All"] + list(set(f.get("severity", "unknown").lower() for f in findings))
+            selected_severity = st.selectbox(
+                "Filter by Severity",
+                options=all_severities,
+                index=0
+            )
+            
+            # Filter findings
+            filtered_findings = findings
+            if selected_severity != "All":
+                filtered_findings = [f for f in findings if f.get("severity", "").lower() == selected_severity.lower()]
+            
+            # Create DataFrame
+            findings_data = []
+            for finding in filtered_findings:
+                findings_data.append({
+                    "Severity": format_severity_badge(finding.get("severity", "unknown")),
+                    "Code": finding.get("code", "N/A"),
+                    "Description": finding.get("description", "No description"),
+                    "Recommendation": finding.get("recommendation", "No recommendation")
+                })
+            
+            df = pd.DataFrame(findings_data)
+            
+            # Display table
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                height=400
+            )
+            
+            st.caption(f"Showing {len(filtered_findings)} of {len(findings)} findings")
+        else:
+            st.success("✅ No security findings detected!")
+    else:
+        st.info("👈 Upload and analyze a configuration file to see findings")
+
+with tab3:
+    # Section 4: Recent History
+    st.header("📜 Configuration History")
+    
+    try:
+        history_result = list_configs(limit=20)
+        
+        if history_result and "items" in history_result and history_result["items"]:
+            configs = history_result["items"]
+            
+            # Create DataFrame
+            history_data = []
+            for config in configs:
+                history_data.append({
+                    "Config ID": config.get("id"),
+                    "Filename": config.get("filename", "N/A"),
+                    "Vendor": config.get("vendor", "N/A").upper(),
+                    "Device Name": config.get("device_name", "N/A"),
+                    "Environment": config.get("environment", "N/A"),
+                    "Uploaded": config.get("created_at", "N/A")[:19] if config.get("created_at") else "N/A",
+                    "Parsed": "✅" if config.get("has_parsed_data") else "❌"
+                })
+            
+            df_history = pd.DataFrame(history_data)
+            
+            # Display table
+            st.dataframe(
+                df_history,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Config selector
+            config_options = {f"{c.get('id')} - {c.get('filename', 'N/A')}": c.get("id") for c in configs}
+            selected_config_label = st.selectbox(
+                "Select a configuration to load:",
+                options=[""] + list(config_options.keys()),
+                index=0
+            )
+            
+            if selected_config_label and selected_config_label in config_options:
+                selected_config_id = config_options[selected_config_label]
+                
+                if st.button(f"📂 Load Config {selected_config_id}", use_container_width=True):
+                    try:
+                        with st.spinner(f"Loading config {selected_config_id}..."):
+                            config_detail = get_config_detail(selected_config_id)
+                            st.session_state.current_config = config_detail
+                            st.session_state.config_id = selected_config_id
+                            
+                            # Try to get audit result
+                            try:
+                                audit_history = get_config_audits(selected_config_id)
+                                if audit_history and "audits" in audit_history and audit_history["audits"]:
+                                    # Get latest audit
+                                    latest_audit = audit_history["audits"][0]
+                                    st.info(f"Config {selected_config_id} loaded. Click 'Re-run Audit' to see results.")
+                            except Exception:
+                                st.info(f"Config {selected_config_id} loaded. Run audit to see results.")
+                            
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to load config: {str(e)}")
+        else:
+            st.info("No configuration history found")
+            
+    except Exception as e:
+        st.error(f"Failed to load history: {str(e)}")
 
 # Footer
 st.markdown("---")
@@ -382,4 +576,3 @@ st.markdown(
     "</div>",
     unsafe_allow_html=True
 )
-

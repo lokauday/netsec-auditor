@@ -6,6 +6,7 @@ from app.models.vpn import VPN
 from app.models.interface import Interface
 from app.models.routing import Route
 from app.models.audit_record import AuditRecord
+from app.models.api_key import APIKey
 
 __all__ = [
     "ConfigFile",
@@ -15,5 +16,6 @@ __all__ = [
     "Interface",
     "Route",
     "AuditRecord",
+    "APIKey",
 ]
 

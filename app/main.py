@@ -23,6 +23,7 @@ from app.models import (
     Interface,
     Route,
     AuditRecord,
+    APIKey,
 )
 
 # Setup logging

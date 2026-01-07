@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.auth import require_role
 from app.models.audit_record import AuditRecord
 from app.schemas.audit import AuditRecordResponse, AuditBreakdown
 
@@ -17,6 +18,7 @@ router = APIRouter()
 @router.get("/{audit_id}", response_model=AuditRecordResponse)
 async def get_audit_record(
     audit_id: int,
+    _client = Depends(require_role("read_only")),
     db: Session = Depends(get_db),
 ):
     """

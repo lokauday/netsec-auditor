@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, s
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.auth import verify_api_key
+from app.core.auth import require_role
 from app.services.config_service import ConfigService
 from app.schemas.config import ConfigFileResponse, ConfigParseResponse
 from app.core.config import settings
@@ -24,7 +24,7 @@ async def upload_config_file(
     device_ip: Optional[str] = Form(None, description="Device IP address"),
     environment: Optional[str] = Form(None, description="Environment (e.g., prod, dev, lab)"),
     location: Optional[str] = Form(None, description="Location or data center name"),
-    api_key: str = Security(verify_api_key),
+    _client = Depends(require_role("read_only")),
     db: Session = Depends(get_db)
 ):
     """
@@ -107,7 +107,7 @@ async def upload_config_file(
 @router.post("/{config_file_id}/parse", response_model=ConfigParseResponse)
 async def parse_config_file(
     config_file_id: int,
-    api_key: str = Security(verify_api_key),
+    _client = Depends(require_role("read_only")),
     db: Session = Depends(get_db)
 ):
     """

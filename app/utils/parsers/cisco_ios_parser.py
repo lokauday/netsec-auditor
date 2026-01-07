@@ -17,28 +17,75 @@ class CiscoIOSParser(BaseParser):
         """Parse ACLs from Cisco IOS config."""
         acls = []
         
-        # Pattern for standard and extended ACLs
+        # Pattern for standard and extended ACLs (numbered)
         # access-list <number> <action> <protocol> <source> [destination] [port]
-        pattern = re.compile(
+        numbered_pattern = re.compile(
             r'access-list\s+(\d+)\s+(permit|deny)\s+(\S+)\s+(\S+)(?:\s+(\S+))?(?:\s+eq\s+(\S+))?',
             re.IGNORECASE
         )
         
+        # Pattern for named IP ACLs (IOS)
+        # ip access-list extended <name>
+        #  <action> <protocol> <source> <destination> [port]
+        named_acl_pattern = re.compile(
+            r'ip access-list (?:extended|standard)\s+(\S+)',
+            re.IGNORECASE
+        )
+        
+        current_named_acl = None
+        sequence = 0
+        
         for line in self.lines:
-            line = line.strip()
-            if line.startswith('access-list '):
-                match = pattern.match(line)
-                if match:
+            line_stripped = line.strip()
+            
+            # Check for named ACL definition
+            named_match = named_acl_pattern.match(line_stripped)
+            if named_match:
+                current_named_acl = named_match.group(1)
+                sequence = 0
+                continue
+            
+            # Check if we're in a named ACL block (starts with space/tab or is a permit/deny line)
+            if current_named_acl and (line_stripped.startswith(('permit', 'deny', ' ')) or line_stripped.startswith('\t')):
+                # Parse permit/deny line in named ACL
+                permit_deny_pattern = re.compile(
+                    r'(permit|deny)\s+(\S+)\s+(\S+)(?:\s+(\S+))?(?:\s+eq\s+(\S+))?',
+                    re.IGNORECASE
+                )
+                permit_match = permit_deny_pattern.match(line_stripped)
+                if permit_match:
+                    sequence += 1
                     acls.append({
-                        "name": match.group(1),
-                        "direction": "inbound",  # Context-dependent
-                        "action": match.group(2),
-                        "protocol": match.group(3),
-                        "source": match.group(4),
-                        "destination": match.group(5) if match.group(5) else None,
-                        "port": match.group(6) if match.group(6) else None,
-                        "raw_config": line,
-                        "rule_number": int(match.group(1)),
+                        "name": current_named_acl,
+                        "direction": "inbound",
+                        "action": permit_match.group(1).lower(),
+                        "protocol": permit_match.group(2).lower(),
+                        "source": permit_match.group(3),
+                        "destination": permit_match.group(4) if permit_match.group(4) else None,
+                        "port": permit_match.group(5) if permit_match.group(5) else None,
+                        "raw_config": line_stripped,
+                        "rule_number": sequence,
+                    })
+                # Reset if we hit a new config section
+                if line_stripped and not line_stripped.startswith((' ', '\t', 'permit', 'deny')):
+                    current_named_acl = None
+                continue
+            
+            # Check for numbered ACLs
+            if line_stripped.startswith('access-list '):
+                numbered_match = numbered_pattern.match(line_stripped)
+                if numbered_match:
+                    sequence += 1
+                    acls.append({
+                        "name": numbered_match.group(1),
+                        "direction": "inbound",
+                        "action": numbered_match.group(2).lower(),
+                        "protocol": numbered_match.group(3).lower(),
+                        "source": numbered_match.group(4),
+                        "destination": numbered_match.group(5) if numbered_match.group(5) else None,
+                        "port": numbered_match.group(6) if numbered_match.group(6) else None,
+                        "raw_config": line_stripped,
+                        "rule_number": sequence,
                     })
         
         return acls

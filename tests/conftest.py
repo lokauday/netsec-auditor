@@ -23,6 +23,7 @@ from app.models import (
     Interface,
     Route,
     AuditRecord,
+    APIKey,
 )
 
 # Use file-based SQLite for testing (more reliable than in-memory)
@@ -93,4 +94,43 @@ def client():
     
     # Clean up: clear dependency overrides after test
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="function")
+def client_with_auth():
+    """
+    Create a test client with API key authentication enabled.
+    
+    Sets API_KEY="test-key" for testing authentication.
+    """
+    def override_get_db():
+        """Override get_db dependency to use test database session."""
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+    
+    # Override database dependency
+    app.dependency_overrides[get_db] = override_get_db
+    
+    # Enable API key auth for this test
+    with patch("app.core.config.settings.API_KEY", "test-key"):
+        yield TestClient(app)
+    
+    # Clean up
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="function")
+def db_session():
+    """
+    Provide a database session for tests that need direct DB access.
+    """
+    db = TestingSessionLocal()
+    try:
+        yield db
+        db.rollback()
+    finally:
+        db.close()
 
