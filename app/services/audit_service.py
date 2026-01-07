@@ -137,7 +137,7 @@ class AuditService:
         except Exception as e:
             logger.warning(f"Could not read raw config file for pattern matching: {e}")
         
-        # ========= ACL_PERMIT_ANY_ANY (CRITICAL) =========
+        # ========= ACL_PERMIT_ANY_ANY (CRITICAL) - ASA only =========
         # Normalize full config text (already lowercased above)
         raw_lower = (raw_config_text or "").lower()
         
@@ -158,24 +158,100 @@ class AuditService:
             "permit udp any any",
         ]
         
-        # Check if any pattern exists in combined text
-        if any(pattern in combined_acl_text for pattern in any_any_patterns):
-            findings.append(
-                SecurityFinding(
-                    severity="critical",
-                    code="ACL_PERMIT_ANY_ANY",
-                    description=(
-                        "Firewall ACL allows unrestricted any-any traffic. "
-                        "This effectively bypasses segmentation and exposes "
-                        "internal resources to untrusted networks."
-                    ),
-                    recommendation=(
-                        "Replace any-any rules with tightly scoped ACL entries. "
-                        "Restrict by source/destination network, ports, and protocols."
-                    ),
-                    affected_objects=["Access Lists"],
-                )
-            )
+        # Check if any pattern exists in combined text (ASA only)
+        if config_file.vendor == VendorType.CISCO_ASA:
+            if any(pattern in combined_acl_text for pattern in any_any_patterns):
+                # Avoid duplicate if already present
+                if not any(f.code == "ACL_PERMIT_ANY_ANY" for f in findings):
+                    findings.append(
+                        SecurityFinding(
+                            severity="critical",
+                            code="ACL_PERMIT_ANY_ANY",
+                            description=(
+                                "Firewall ACL allows unrestricted any-any traffic. "
+                                "This effectively bypasses segmentation and exposes "
+                                "internal resources to untrusted networks."
+                            ),
+                            recommendation=(
+                                "Replace any-any rules with tightly scoped ACL entries. "
+                                "Restrict by source/destination network, ports, and protocols."
+                            ),
+                            affected_objects=["Access Lists"],
+                        )
+                    )
+        
+        # ========= Vendor-specific any-any checks =========
+        vendor = (config_file.vendor.value if config_file.vendor else "").lower()
+        combined_text = (raw_config_text or "").lower()
+        
+        # IOS: IOS_ACL_PERMIT_ANY_ANY (CRITICAL)
+        if vendor == "cisco_ios":
+            if ("permit ip any any" in combined_text or
+                "permit tcp any any" in combined_text or
+                "permit udp any any" in combined_text):
+                # Avoid duplicate if already present
+                if not any(f.code == "IOS_ACL_PERMIT_ANY_ANY" for f in findings):
+                    findings.append(
+                        SecurityFinding(
+                            severity="critical",
+                            code="IOS_ACL_PERMIT_ANY_ANY",
+                            description=(
+                                "Cisco IOS ACL allows unrestricted any-any traffic. "
+                                "This effectively bypasses segmentation and exposes internal networks."
+                            ),
+                            recommendation=(
+                                "Replace any-any rules with tightly scoped ACLs. "
+                                "Restrict by source/destination networks, ports, and protocols."
+                            ),
+                            affected_objects=["Cisco IOS ACLs"],
+                        )
+                    )
+        
+        # Fortinet: FGT_ANY_ANY_POLICY (CRITICAL)
+        if vendor == "fortinet":
+            if ("config firewall policy" in combined_text and
+                'set srcaddr "all"' in combined_text and
+                'set dstaddr "all"' in combined_text and
+                'set action accept' in combined_text):
+                if not any(f.code == "FGT_ANY_ANY_POLICY" for f in findings):
+                    findings.append(
+                        SecurityFinding(
+                            severity="critical",
+                            code="FGT_ANY_ANY_POLICY",
+                            description=(
+                                "Fortinet firewall policy allows any-to-any traffic with action accept. "
+                                "This creates a broad exposure to untrusted networks."
+                            ),
+                            recommendation=(
+                                "Replace any-any policies with more specific rules. "
+                                "Limit by source/destination address objects, services, and users."
+                            ),
+                            affected_objects=["Fortinet firewall policies"],
+                        )
+                    )
+        
+        # Palo Alto: PA_ANY_ANY_RULE (CRITICAL)
+        if vendor == "palo_alto":
+            if ("rulebase security" in combined_text and
+                " source any" in combined_text and
+                " destination any" in combined_text and
+                " action allow" in combined_text):
+                if not any(f.code == "PA_ANY_ANY_RULE" for f in findings):
+                    findings.append(
+                        SecurityFinding(
+                            severity="critical",
+                            code="PA_ANY_ANY_RULE",
+                            description=(
+                                "Palo Alto security rule allows any-to-any traffic with action allow. "
+                                "This can expose internal resources to untrusted sources."
+                            ),
+                            recommendation=(
+                                "Replace any-any rules with scoped policies using address groups, "
+                                "applications, and user-based controls."
+                            ),
+                            affected_objects=["Palo Alto security rules"],
+                        )
+                    )
         
         # Check 2: DEFAULT_ROUTE_OUTSIDE (medium)
         # Check for "route outside 0.0.0.0 0.0.0.0" in raw config or route data
@@ -347,6 +423,343 @@ class AuditService:
                     recommendation="Migrate to stronger algorithms such as AES-GCM and SHA-256 or better for VPN, SSL, and authentication.",
                     affected_objects=["Crypto / VPN / SSL settings"]
                 ))
+        
+        # ========== PHASE A: ADVANCED ASA SECURITY RULES ==========
+        
+        # A.1: ASA_INSPECTION_MISCONFIG (HIGH) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_INSPECTION_MISCONFIG" not in existing_codes:
+                has_global_policy = "policy-map global_policy" in raw_config_text
+                has_service_policy = "service-policy global_policy global" in raw_config_text
+                
+                if has_global_policy:
+                    # Check if policy-map has inspect lines in class inspection_default
+                    lines = raw_config_text.split('\n')
+                    in_policy_map = False
+                    in_inspection_default = False
+                    has_inspect_lines = False
+                    
+                    for line in lines:
+                        line_stripped = line.strip()
+                        line_lower = line_stripped.lower()
+                        
+                        if "policy-map global_policy" in line_lower:
+                            in_policy_map = True
+                        elif in_policy_map and "class inspection_default" in line_lower:
+                            in_inspection_default = True
+                        elif in_inspection_default:
+                            if line_stripped and not (line_stripped.startswith(' ') or line_stripped.startswith('\t')):
+                                if "class" not in line_lower and "policy-map" not in line_lower:
+                                    in_inspection_default = False
+                                    in_policy_map = False
+                            elif "inspect" in line_lower:
+                                has_inspect_lines = True
+                                break
+                    
+                    # If policy-map exists but has no inspect lines, it's misconfigured
+                    if not has_inspect_lines:
+                        findings.append(SecurityFinding(
+                            severity="high",
+                            code="ASA_INSPECTION_MISCONFIG",
+                            description="Global policy-map exists but class inspection_default has no inspect statements, disabling application-layer inspection.",
+                            recommendation="Add appropriate inspect statements (e.g., inspect dns, inspect ftp, inspect http) to class inspection_default in policy-map global_policy.",
+                            affected_objects=["policy-map global_policy", "class inspection_default"],
+                        ))
+                elif "no service-policy global_policy global" in raw_config_text:
+                    findings.append(SecurityFinding(
+                        severity="high",
+                        code="ASA_INSPECTION_MISCONFIG",
+                        description="Global service-policy is explicitly disabled, disabling application-layer inspection.",
+                        recommendation="Enable service-policy: 'service-policy global_policy global' and configure appropriate inspection policies.",
+                        affected_objects=["service-policy global_policy global"],
+                    ))
+        
+        # A.2: ASA_WEAK_VPN_SUITE (HIGH) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_WEAK_VPN_SUITE" not in existing_codes:
+                # Check for weak VPN crypto (transform-sets and IKE policies)
+                weak_vpn_found = False
+                
+                # Read original config for case preservation
+                try:
+                    config_path = Path(config_file.file_path)
+                    if config_path.exists():
+                        raw_config_original = config_path.read_text(encoding='utf-8', errors='ignore')
+                    else:
+                        raw_config_original = raw_config_text
+                except Exception:
+                    raw_config_original = raw_config_text
+                
+                lines = raw_config_original.split('\n')
+                lines_lower = [l.lower() for l in lines]
+                
+                # Check for weak crypto in transform-sets and IKE policies
+                for i, line_lower in enumerate(lines_lower):
+                    if "crypto ipsec transform-set" in line_lower or "crypto ikev1 policy" in line_lower or "crypto ikev2 policy" in line_lower:
+                        # Check for weak algorithms in the block
+                        weak_algorithms = ["des", "3des", "md5", "sha1"]
+                        weak_dh_groups = ["group 1", "group 2", "group 5", "dh group 1", "dh group 2", "dh group 5"]
+                        
+                        # Check current line and next few lines (crypto blocks are multi-line)
+                        crypto_block = " ".join(lines_lower[max(0, i):min(len(lines_lower), i+10)])
+                        if any(weak in crypto_block for weak in weak_algorithms + weak_dh_groups):
+                            weak_vpn_found = True
+                            break
+                
+                if weak_vpn_found:
+                    findings.append(SecurityFinding(
+                        severity="high",
+                        code="ASA_WEAK_VPN_SUITE",
+                        description="VPN/IPsec configuration uses weak cryptographic algorithms (DES, 3DES, MD5, SHA-1) or weak Diffie-Hellman groups (1, 2, 5).",
+                        recommendation="Migrate to modern crypto suites: AES-256 or AES-GCM for encryption, SHA-256+ for hashing, and DH group 14+ or ECDH for key exchange.",
+                        affected_objects=["VPN crypto configuration"],
+                    ))
+        
+        # A.3: ASA_ANY_ANY_OBJECT_GROUP (CRITICAL) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_ANY_ANY_OBJECT_GROUP" not in existing_codes:
+                lines = raw_config_text.split('\n')
+                any_any_object_groups = []
+                current_group = None
+                current_group_name = None
+                
+                for line in lines:
+                    line_stripped = line.strip()
+                    line_lower = line_stripped.lower()
+                    
+                    if line_lower.startswith("object-group network") or line_lower.startswith("object-group service"):
+                        parts = line_lower.split()
+                        if len(parts) >= 3:
+                            current_group_name = parts[2]
+                            current_group = line_lower
+                    
+                    elif current_group_name:
+                        # Check for any-any patterns (0.0.0.0/0 or "any")
+                        if ("network-object 0.0.0.0 0.0.0.0" in line_lower or
+                            "network-object any" in line_lower or
+                            "service-object any" in line_lower):
+                            if current_group_name not in any_any_object_groups:
+                                any_any_object_groups.append(current_group_name)
+                    
+                    # Reset on new top-level config
+                    if line_stripped and not (line_stripped.startswith(' ') or line_stripped.startswith('\t')):
+                        if not (line_lower.startswith("object-group network") or line_lower.startswith("object-group service")):
+                            current_group = None
+                            current_group_name = None
+                
+                # Check if any of these object-groups are used in ACLs
+                if any_any_object_groups:
+                    for group_name in any_any_object_groups:
+                        # Check if referenced in ACL
+                        for line in lines:
+                            if "access-list" in line.lower() and group_name.lower() in line.lower():
+                                findings.append(SecurityFinding(
+                                    severity="critical",
+                                    code="ASA_ANY_ANY_OBJECT_GROUP",
+                                    description=f"Object-group '{group_name}' contains 'any' or '0.0.0.0/0' and is used in ACLs, creating unrestricted access.",
+                                    recommendation="Replace object-group members with specific network/service definitions. Remove 'any' or '0.0.0.0/0' entries.",
+                                    affected_objects=[f"Object-group: {group_name}"],
+                                ))
+                                break
+        
+        # A.4.1: ASA_MGMT_EXPOSED_OUTSIDE (CRITICAL) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_MGMT_EXPOSED_OUTSIDE" not in existing_codes:
+                lines = raw_config_text.split('\n')
+                exposed_mgmt = []
+                
+                for line in lines:
+                    line_stripped = line.strip()
+                    line_lower = line_stripped.lower()
+                    
+                    # Check for management services on outside interface
+                    # ssh 0.0.0.0 0.0.0.0 outside
+                    # http 0.0.0.0 0.0.0.0 outside
+                    # telnet 0.0.0.0 0.0.0.0 outside
+                    mgmt_patterns = [
+                        ("ssh", "ssh 0.0.0.0 0.0.0.0 outside"),
+                        ("http", "http 0.0.0.0 0.0.0.0 outside"),
+                        ("https", "https 0.0.0.0 0.0.0.0 outside"),
+                        ("telnet", "telnet 0.0.0.0 0.0.0.0 outside"),
+                    ]
+                    
+                    for service, pattern in mgmt_patterns:
+                        if pattern in line_lower or (service in line_lower and "outside" in line_lower and ("0.0.0.0 0.0.0.0" in line_lower or "any" in line_lower)):
+                            exposed_mgmt.append((service, line_stripped[:100]))
+                            break
+                
+                if exposed_mgmt:
+                    services_list = ", ".join([s[0].upper() for s in exposed_mgmt])
+                    findings.append(SecurityFinding(
+                        severity="critical",
+                        code="ASA_MGMT_EXPOSED_OUTSIDE",
+                        description=f"Management services ({services_list}) are exposed on the outside interface with unrestricted access (0.0.0.0/0).",
+                        recommendation="Restrict management access to specific trusted IP addresses or networks. Use out-of-band management or VPN for administrative access. Remove 0.0.0.0/0 from outside interface management configuration.",
+                        affected_objects=[f"{s[0]}: {s[1]}" for s in exposed_mgmt[:3]],
+                    ))
+        
+        # A.4.2: ASA_SNMP_WEAK_COMMUNITY (MEDIUM) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_SNMP_WEAK_COMMUNITY" not in existing_codes:
+                lines = raw_config_text.split('\n')
+                weak_snmp_found = False
+                weak_communities = ["public", "private", "snmp", "community"]
+                
+                for line in lines:
+                    line_stripped = line.strip()
+                    line_lower = line_stripped.lower()
+                    
+                    if "snmp-server community" in line_lower:
+                        # Check for weak default communities
+                        for weak_comm in weak_communities:
+                            if f"community {weak_comm}" in line_lower:
+                                weak_snmp_found = True
+                                findings.append(SecurityFinding(
+                                    severity="medium",
+                                    code="ASA_SNMP_WEAK_COMMUNITY",
+                                    description=f"SNMP is configured with weak default community string '{weak_comm}', which is easily guessable.",
+                                    recommendation="Use SNMPv3 with authentication and encryption, or use strong community strings. Remove SNMP from untrusted interfaces.",
+                                    affected_objects=[f"SNMP community: {line_stripped[:80]}"],
+                                ))
+                                break
+                        if weak_snmp_found:
+                            break
+        
+        # A.5: ASA_SHADOWED_ACL (MEDIUM) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_SHADOWED_ACL" not in existing_codes and acls:
+                # Simplified shadow rule detection
+                acl_groups = {}
+                for acl in acls:
+                    acl_name = getattr(acl, "name", None) or ""
+                    if acl_name not in acl_groups:
+                        acl_groups[acl_name] = []
+                    acl_groups[acl_name].append(acl)
+                
+                shadowed_found = False
+                for acl_name, acl_list in acl_groups.items():
+                    if len(acl_list) < 2:
+                        continue
+                    
+                    # Sort by rule_number if available
+                    sorted_acls = sorted(acl_list, key=lambda x: getattr(x, "rule_number", 0) or 0)
+                    
+                    # Check if any later rule is shadowed by an earlier "any any" rule
+                    for i, later_acl in enumerate(sorted_acls[1:], 1):
+                        for earlier_acl in sorted_acls[:i]:
+                            earlier_src = (getattr(earlier_acl, "source", "") or "").lower()
+                            earlier_dst = (getattr(earlier_acl, "destination", "") or "").lower()
+                            earlier_action = (getattr(earlier_acl, "action", "") or "").lower()
+                            earlier_proto = (getattr(earlier_acl, "protocol", "") or "").lower()
+                            
+                            later_src = (getattr(later_acl, "source", "") or "").lower()
+                            later_dst = (getattr(later_acl, "destination", "") or "").lower()
+                            later_proto = (getattr(later_acl, "protocol", "") or "").lower()
+                            
+                            # If earlier rule is "any any" with permit/deny, later rules with same protocol are shadowed
+                            if (earlier_src == "any" and earlier_dst == "any" and 
+                                earlier_proto == later_proto and earlier_proto in ["ip", "tcp", "udp"]):
+                                shadowed_found = True
+                                findings.append(SecurityFinding(
+                                    severity="medium",
+                                    code="ASA_SHADOWED_ACL",
+                                    description=f"ACL '{acl_name}' contains shadowed rules: rule at position {i+1} is unreachable due to earlier 'any any' rule.",
+                                    recommendation="Remove or reorder ACL rules so that specific rules come before general 'any any' rules. Remove unreachable shadowed rules.",
+                                    affected_objects=[f"ACL: {acl_name}", f"Shadowed rule: {getattr(later_acl, 'raw_config', 'N/A')[:60]}"],
+                                ))
+                                break
+                        if shadowed_found:
+                            break
+                    if shadowed_found:
+                        break
+        
+        # A.6: ASA_UNUSED_ACL (LOW) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_UNUSED_ACL" not in existing_codes and acls:
+                # Find all ACL names
+                acl_names = set()
+                for acl in acls:
+                    acl_name = getattr(acl, "name", None) or ""
+                    if acl_name:
+                        acl_names.add(acl_name.lower())
+                
+                # Find all ACLs referenced by access-group commands
+                lines = raw_config_text.split('\n')
+                used_acl_names = set()
+                for line in lines:
+                    line_lower = line.strip().lower()
+                    # access-group <acl_name> in interface <iface>
+                    # access-group <acl_name> out interface <iface>
+                    if "access-group" in line_lower:
+                        parts = line_lower.split()
+                        try:
+                            acl_idx = parts.index("access-group")
+                            if acl_idx + 1 < len(parts):
+                                used_acl_names.add(parts[acl_idx + 1].lower())
+                        except ValueError:
+                            pass
+                
+                # Find unused ACLs
+                unused_acls = acl_names - used_acl_names
+                if unused_acls:
+                    unused_list = list(unused_acls)[:5]  # Limit to first 5
+                    findings.append(SecurityFinding(
+                        severity="low",
+                        code="ASA_UNUSED_ACL",
+                        description=f"ACL(s) {', '.join(unused_list)} are defined but not applied to any interface via access-group.",
+                        recommendation="Apply unused ACLs to appropriate interfaces using 'access-group <acl_name> in|out interface <iface>', or remove if no longer needed.",
+                        affected_objects=[f"Unused ACL: {name}" for name in unused_list],
+                    ))
+        
+        # A.7: ASA_OVERLAPPING_ACL (LOW) - ASA only
+        if raw_config_text and config_file.vendor == VendorType.CISCO_ASA:
+            existing_codes = [f.code for f in findings]
+            if "ASA_OVERLAPPING_ACL" not in existing_codes and acls:
+                # Group ACLs by name
+                acl_groups = {}
+                for acl in acls:
+                    acl_name = getattr(acl, "name", None) or ""
+                    if acl_name not in acl_groups:
+                        acl_groups[acl_name] = []
+                    acl_groups[acl_name].append(acl)
+                
+                overlapping_found = False
+                for acl_name, acl_list in acl_groups.items():
+                    if len(acl_list) < 2:
+                        continue
+                    
+                    # Check for duplicate or very similar rules (same src/dst/proto/port)
+                    seen_rules = {}
+                    for acl in acl_list:
+                        src = (getattr(acl, "source", "") or "").lower()
+                        dst = (getattr(acl, "destination", "") or "").lower()
+                        proto = (getattr(acl, "protocol", "") or "").lower()
+                        port = (getattr(acl, "port", "") or "").lower()
+                        action = (getattr(acl, "action", "") or "").lower()
+                        
+                        rule_key = (src, dst, proto, port, action)
+                        if rule_key in seen_rules:
+                            overlapping_found = True
+                            findings.append(SecurityFinding(
+                                severity="low",
+                                code="ASA_OVERLAPPING_ACL",
+                                description=f"ACL '{acl_name}' contains duplicate or overlapping rules with identical source, destination, protocol, and port conditions.",
+                                recommendation="Consolidate duplicate rules. Remove redundant ACL entries to improve performance and maintainability.",
+                                affected_objects=[f"ACL: {acl_name}", f"Overlapping rule: {getattr(acl, 'raw_config', 'N/A')[:60]}"],
+                            ))
+                            break
+                        seen_rules[rule_key] = acl
+                    if overlapping_found:
+                        break
+        
+        # ========== END PHASE A CHECKS ==========
         
         return findings
     
