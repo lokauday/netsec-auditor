@@ -1,0 +1,46 @@
+services:
+  # API Service (FastAPI Backend)
+  - type: web
+    name: netsec-auditor-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+        description: PostgreSQL connection string (set from Render Postgres service)
+      - key: OPENAI_API_KEY
+        sync: false
+        description: OpenAI API key for AI-enhanced analysis (optional)
+      - key: API_KEY
+        sync: false
+        description: Static API key for initial admin access (optional)
+      - key: ALLOWED_ORIGINS
+        sync: false
+        description: Comma-separated list of allowed CORS origins
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: "INFO"
+
+  # UI Service (Streamlit Frontend)
+  - type: web
+    name: netsec-auditor-ui
+    env: docker
+    dockerfilePath: ./Dockerfile.streamlit
+    dockerContext: .
+    plan: starter
+    envVars:
+      - key: BACKEND_URL
+        sync: false
+        description: Backend API URL (e.g., https://netsec-auditor-api.onrender.com)
+
+databases:
+  # PostgreSQL Database (optional - can be created via dashboard)
+  - name: netsec-auditor-db
+    plan: starter
+    databaseName: netsec_auditor
+    user: netsec_user
+

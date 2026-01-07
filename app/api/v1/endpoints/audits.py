@@ -25,52 +25,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/{audit_id}", response_model=AuditRecordResponse)
-async def get_audit_record(
-    audit_id: int,
-    _client = Depends(require_role("read_only")),
-    db: Session = Depends(get_db),
-):
-    """
-    Get a single audit record by ID.
-    
-    Returns the full audit record including findings and breakdown.
-    """
-    try:
-        audit_record = db.query(AuditRecord).filter(AuditRecord.id == audit_id).first()
-        
-        if not audit_record:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Audit record with id {audit_id} not found"
-            )
-        
-        # Convert breakdown JSON to AuditBreakdown model
-        breakdown = AuditBreakdown(**audit_record.breakdown)
-        
-        logger.info(f"Retrieved audit record {audit_id} for config_file_id={audit_record.config_file_id}")
-        
-        return AuditRecordResponse(
-            id=audit_record.id,
-            config_file_id=audit_record.config_file_id,
-            risk_score=audit_record.risk_score,
-            summary=audit_record.summary,
-            breakdown=breakdown,
-            findings=audit_record.findings,
-            created_at=audit_record.created_at,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving audit record {audit_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve audit record"
-        )
+# IMPORTANT: Static routes must be defined BEFORE path parameters
+# Otherwise FastAPI will try to parse "summary" and "history" as audit_id integers
 
 
 @router.get("/summary", response_model=AuditSummaryResponse)
 async def get_audit_summary(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    vendor: Optional[str] = Query(None, description="Filter by vendor"),
+    environment: Optional[str] = Query(None, description="Filter by environment"),
     _client = Depends(require_role("read_only")),
     db: Session = Depends(get_db),
 ):
@@ -79,10 +43,55 @@ async def get_audit_summary(
     
     Returns total configs audited, findings by severity, average risk score,
     and findings over time (by day).
+    
+    Supports filtering by date range, vendor, and environment.
     """
     try:
-        # Get all audit records
-        all_audits = db.query(AuditRecord).all()
+        # Build query with joins for filtering
+        query = (
+            db.query(AuditRecord, ConfigFile)
+            .join(ConfigFile, AuditRecord.config_file_id == ConfigFile.id)
+        )
+        
+        # Apply filters
+        if start_date:
+            try:
+                start_dt = datetime.fromisoformat(start_date)
+                query = query.filter(ConfigFile.uploaded_at >= start_dt)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_date format. Use YYYY-MM-DD"
+                )
+        
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date)
+                # Add one day to include the entire end date
+                end_dt = end_dt + timedelta(days=1)
+                query = query.filter(ConfigFile.uploaded_at < end_dt)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end_date format. Use YYYY-MM-DD"
+                )
+        
+        if vendor:
+            try:
+                vendor_enum = VendorType(vendor.lower())
+                query = query.filter(ConfigFile.vendor == vendor_enum)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid vendor. Must be one of: {', '.join([v.value for v in VendorType])}"
+                )
+        
+        if environment:
+            query = query.filter(ConfigFile.environment == environment)
+        
+        # Get all matching audit records
+        results = query.all()
+        all_audits = [audit_record for audit_record, _ in results]
         total_configs = len(set(audit.config_file_id for audit in all_audits))
         
         # Aggregate findings by severity
@@ -253,4 +262,48 @@ async def get_audit_history(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve audit history"
+        )
+
+
+@router.get("/{audit_id}", response_model=AuditRecordResponse)
+async def get_audit_record(
+    audit_id: int,
+    _client = Depends(require_role("read_only")),
+    db: Session = Depends(get_db),
+):
+    """
+    Get a single audit record by ID.
+    
+    Returns the full audit record including findings and breakdown.
+    """
+    try:
+        audit_record = db.query(AuditRecord).filter(AuditRecord.id == audit_id).first()
+        
+        if not audit_record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Audit record with id {audit_id} not found"
+            )
+        
+        # Convert breakdown JSON to AuditBreakdown model
+        breakdown = AuditBreakdown(**audit_record.breakdown)
+        
+        logger.info(f"Retrieved audit record {audit_id} for config_file_id={audit_record.config_file_id}")
+        
+        return AuditRecordResponse(
+            id=audit_record.id,
+            config_file_id=audit_record.config_file_id,
+            risk_score=audit_record.risk_score,
+            summary=audit_record.summary,
+            breakdown=breakdown,
+            findings=audit_record.findings,
+            created_at=audit_record.created_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving audit record {audit_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve audit record"
         )

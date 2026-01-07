@@ -33,17 +33,15 @@ if "api_key" not in st.session_state:
     st.session_state.api_key = None
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
+if "backend_url" not in st.session_state:
+    st.session_state.backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
 # ============= API Client Helpers =============
 
 def get_base_url() -> str:
-    """Get backend base URL from session state, environment, or default."""
-    # Check session state first (set from sidebar)
-    if "backend_url" in st.session_state:
-        return st.session_state.backend_url
-    # Fall back to environment variable
-    return os.getenv("BACKEND_URL", "http://localhost:8000")
+    """Get backend base URL from session state."""
+    return st.session_state.backend_url
 
 
 def get_api_key() -> Optional[str]:
@@ -214,13 +212,28 @@ def get_config_audits(config_id: int) -> Dict[str, Any]:
         raise Exception(f"Failed to get audit history: {str(e)}")
 
 
-def get_audit_summary() -> Dict[str, Any]:
-    """Get audit summary/analytics."""
+def get_audit_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    vendor: Optional[str] = None,
+    environment: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Get audit summary/analytics with optional filters."""
     url = f"{get_base_url()}/api/v1/audits/summary"
     headers = get_headers()
+    params = {}
+    
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+    if vendor:
+        params["vendor"] = vendor
+    if environment:
+        params["environment"] = environment
     
     try:
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -289,14 +302,7 @@ def format_severity_badge(severity: str) -> str:
 with st.sidebar:
     st.header("⚙️ Settings")
     
-    backend_url = st.text_input(
-        "Backend URL",
-        value=get_base_url(),
-        help="Base URL of the FastAPI backend",
-        key="backend_url"
-    )
-    if backend_url != get_base_url():
-        os.environ["BACKEND_URL"] = backend_url
+    backend_url = st.text_input("Backend URL", key="backend_url")
     
     api_key = st.text_input(
         "API Key (Optional)",
@@ -642,108 +648,248 @@ with tab3:
     # Section 4: Enhanced History with Filters and Analytics
     st.header("📜 Audit History & Analytics")
     
-    # Filters section
-    with st.expander("🔍 Filters", expanded=True):
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            start_date = st.date_input("Start Date", value=None)
-        with col2:
-            end_date = st.date_input("End Date", value=None)
-        with col3:
-            vendor_options = ["All"] + ["cisco_asa", "cisco_ios", "fortinet", "palo_alto"]
-            selected_vendor = st.selectbox("Vendor", options=vendor_options, index=0)
-        with col4:
-            environment_options = ["All", "Prod", "Dev", "Test", "DMZ", "Other"]
-            selected_environment = st.selectbox("Environment", options=environment_options, index=0)
+    # Initialize filter state
+    if "history_filters_applied" not in st.session_state:
+        st.session_state.history_filters_applied = False
+    if "history_summary_data" not in st.session_state:
+        st.session_state.history_summary_data = None
+    if "history_data" not in st.session_state:
+        st.session_state.history_data = None
     
-    # Get audit summary for charts
-    try:
-        summary_data = get_audit_summary()
+    # Filters section
+    st.subheader("🔍 Filters")
+    filter_col1, filter_col2 = st.columns(2)
+    
+    with filter_col1:
+        filter_row1_col1, filter_row1_col2 = st.columns(2)
+        with filter_row1_col1:
+            start_date = st.date_input("Start Date", value=None, key="history_start_date")
+        with filter_row1_col2:
+            end_date = st.date_input("End Date", value=None, key="history_end_date")
+    
+    with filter_col2:
+        filter_row2_col1, filter_row2_col2, filter_row2_col3 = st.columns([2, 2, 1])
+        with filter_row2_col1:
+            vendor_options = ["All"] + ["cisco_asa", "cisco_ios", "fortinet", "palo_alto"]
+            selected_vendor = st.selectbox("Vendor", options=vendor_options, index=0, key="history_vendor")
+        with filter_row2_col2:
+            environment_options = ["All", "Prod", "Dev", "Test", "DMZ", "Other"]
+            selected_environment = st.selectbox("Environment", options=environment_options, index=0, key="history_environment")
+        with filter_row2_col3:
+            st.write("")  # Spacer
+            st.write("")  # Spacer
+            apply_filters = st.button("🔍 Apply Filters", use_container_width=True, type="primary")
+    
+    # Build filter params
+    filter_params = {}
+    if start_date:
+        filter_params["start_date"] = start_date.isoformat()
+    if end_date:
+        filter_params["end_date"] = end_date.isoformat()
+    if selected_vendor != "All":
+        filter_params["vendor"] = selected_vendor
+    if selected_environment != "All":
+        filter_params["environment"] = selected_environment
+    
+    # Load data when filters are applied or on initial load
+    if apply_filters or not st.session_state.history_filters_applied:
+        st.session_state.history_filters_applied = True
         
-        if summary_data:
-            # Charts section
-            st.subheader("📊 Analytics Overview")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Configs Audited", summary_data.get("total_configs_audited", 0))
-            with col2:
-                st.metric("Average Risk Score", f"{summary_data.get('average_risk_score', 0):.1f}")
-            with col3:
-                total_findings = sum(summary_data.get("findings_by_severity", {}).values())
-                st.metric("Total Findings", total_findings)
-            
-            # Risk score over time chart
-            if summary_data.get("findings_over_time"):
-                st.subheader("📈 Findings Over Time")
-                time_data = summary_data["findings_over_time"]
-                if time_data:
-                    chart_df = pd.DataFrame(time_data)
-                    chart_df["date"] = pd.to_datetime(chart_df["date"])
-                    chart_df = chart_df.set_index("date")
-                    st.line_chart(chart_df[["critical", "high", "medium", "low"]])
-            
-            # Findings by severity bar chart
-            st.subheader("📊 Findings by Severity (All Time)")
-            severity_data = summary_data.get("findings_by_severity", {})
-            if severity_data:
-                severity_df = pd.DataFrame({
-                    "Severity": list(severity_data.keys()),
-                    "Count": list(severity_data.values())
-                })
-                st.bar_chart(severity_df.set_index("Severity"))
+        # Load summary with spinner
+        with st.spinner("Loading audit summary..."):
+            try:
+                summary_data = get_audit_summary(**filter_params)
+                st.session_state.history_summary_data = summary_data
+            except Exception as e:
+                st.error(f"Could not load audit summary: {str(e)}")
+                st.session_state.history_summary_data = None
         
-        st.markdown("---")
+        # Load history with spinner
+        with st.spinner("Loading audit history..."):
+            try:
+                history_params = filter_params.copy()
+                history_result = get_audit_history(**history_params, limit=200)
+                st.session_state.history_data = history_result
+            except Exception as e:
+                st.error(f"Could not load audit history: {str(e)}")
+                st.session_state.history_data = None
+    
+    # Use cached data
+    summary_data = st.session_state.history_summary_data
+    history_result = st.session_state.history_data
+    
+    # Summary cards
+    if summary_data and summary_data.get("total_configs_audited", 0) > 0:
+        st.subheader("📊 Summary Metrics")
         
-        # Get filtered audit history
-        history_params = {}
-        if start_date:
-            history_params["start_date"] = start_date.isoformat()
-        if end_date:
-            history_params["end_date"] = end_date.isoformat()
-        if selected_vendor != "All":
-            history_params["vendor"] = selected_vendor
-        if selected_environment != "All":
-            history_params["environment"] = selected_environment
-        
-        history_result = get_audit_history(**history_params, limit=100)
+        # Calculate additional metrics from history if available
+        max_risk = 0
+        min_risk = 100
+        total_audits = 0
         
         if history_result and "items" in history_result and history_result["items"]:
-            audits = history_result["items"]
+            risk_scores = [a.get("risk_score", 0) for a in history_result["items"]]
+            if risk_scores:
+                max_risk = max(risk_scores)
+                min_risk = min(risk_scores)
+            total_audits = len(history_result["items"])
+        
+        findings_by_severity = summary_data.get("findings_by_severity", {})
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Audits", total_audits or summary_data.get("total_configs_audited", 0))
+        with col2:
+            avg_risk = summary_data.get("average_risk_score", 0.0)
+            st.metric("Avg Risk Score", f"{avg_risk:.1f}/100")
+        with col3:
+            st.metric("Max Risk Score", f"{max_risk}/100" if max_risk > 0 else "N/A")
+        with col4:
+            critical_count = findings_by_severity.get("critical", 0)
+            st.metric("Critical Findings", critical_count)
+        
+        # Additional severity metrics
+        st.markdown("---")
+        severity_col1, severity_col2, severity_col3, severity_col4 = st.columns(4)
+        with severity_col1:
+            st.metric("🔴 Critical", findings_by_severity.get("critical", 0))
+        with severity_col2:
+            st.metric("🟠 High", findings_by_severity.get("high", 0))
+        with severity_col3:
+            st.metric("🟡 Medium", findings_by_severity.get("medium", 0))
+        with severity_col4:
+            st.metric("🔵 Low", findings_by_severity.get("low", 0))
+    elif summary_data:
+        st.info("No audit data found for the selected filters.")
+    else:
+        st.warning("Could not load audit summary. Check backend URL and API key.")
+    
+    # Charts section
+    if history_result and "items" in history_result and history_result["items"]:
+        audits = history_result["items"]
+        
+        if len(audits) > 0:
+            st.markdown("---")
+            st.subheader("📈 Charts")
             
-            st.subheader(f"📋 Audit History ({history_result.get('total', 0)} total)")
+            # Risk score over time chart
+            chart_col1, chart_col2 = st.columns(2)
             
-            # Create DataFrame
-            history_data = []
-            for audit in audits:
-                history_data.append({
-                    "Config ID": audit.get("config_id"),
-                    "Filename": audit.get("filename", "N/A"),
-                    "Vendor": audit.get("vendor", "N/A").upper(),
-                    "Device Name": audit.get("device_name", "N/A"),
-                    "Environment": audit.get("environment", "N/A"),
-                    "Uploaded": audit.get("uploaded_at", "N/A")[:19] if audit.get("uploaded_at") else "N/A",
-                    "Risk Score": audit.get("risk_score", 0),
-                    "Total Findings": audit.get("total_findings", 0)
-                })
+            with chart_col1:
+                st.markdown("**Risk Score Over Time**")
+                # Prepare data for risk score chart
+                risk_data = []
+                for audit in audits:
+                    uploaded_at = audit.get("uploaded_at")
+                    if uploaded_at:
+                        try:
+                            # Parse ISO format datetime
+                            if isinstance(uploaded_at, str):
+                                dt = datetime.fromisoformat(uploaded_at.replace('Z', '+00:00'))
+                            else:
+                                dt = uploaded_at
+                            risk_data.append({
+                                "Date": dt,
+                                "Risk Score": audit.get("risk_score", 0),
+                                "Vendor": audit.get("vendor", "unknown")
+                            })
+                        except Exception:
+                            continue
+                
+                if risk_data:
+                    risk_df = pd.DataFrame(risk_data)
+                    risk_df = risk_df.sort_values("Date")
+                    risk_df = risk_df.set_index("Date")
+                    st.line_chart(risk_df[["Risk Score"]], height=300)
+                else:
+                    st.info("No date data available for charting.")
             
-            df_history = pd.DataFrame(history_data)
+            with chart_col2:
+                st.markdown("**Findings by Severity**")
+                if summary_data and findings_by_severity:
+                    severity_df = pd.DataFrame({
+                        "Severity": ["Critical", "High", "Medium", "Low"],
+                        "Count": [
+                            findings_by_severity.get("critical", 0),
+                            findings_by_severity.get("high", 0),
+                            findings_by_severity.get("medium", 0),
+                            findings_by_severity.get("low", 0),
+                        ]
+                    })
+                    severity_df = severity_df.set_index("Severity")
+                    st.bar_chart(severity_df, height=300)
+                else:
+                    st.info("No severity data available.")
+    
+    # History table
+    if history_result and "items" in history_result and history_result["items"]:
+        audits = history_result["items"]
+        
+        st.markdown("---")
+        st.subheader(f"📋 Audit History ({history_result.get('total', len(audits))} total)")
+        
+        # Create DataFrame with sortable columns
+        history_data = []
+        for audit in audits:
+            uploaded_at = audit.get("uploaded_at", "")
+            # Format datetime for display
+            if uploaded_at:
+                try:
+                    if isinstance(uploaded_at, str):
+                        dt = datetime.fromisoformat(uploaded_at.replace('Z', '+00:00'))
+                    else:
+                        dt = uploaded_at
+                    formatted_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    formatted_date = str(uploaded_at)[:19] if len(str(uploaded_at)) > 19 else str(uploaded_at)
+            else:
+                formatted_date = "N/A"
+            
+            # Get sort date for sorting
+            sort_date = datetime.min
+            if uploaded_at:
+                try:
+                    if isinstance(uploaded_at, str):
+                        sort_date = datetime.fromisoformat(uploaded_at.replace('Z', '+00:00'))
+                    else:
+                        sort_date = uploaded_at
+                except Exception:
+                    pass
+            
+            history_data.append({
+                "Audit ID": audit.get("config_id", "N/A"),  # Using config_id as audit identifier
+                "Config ID": audit.get("config_id", "N/A"),
+                "Filename": audit.get("filename", "N/A"),
+                "Vendor": audit.get("vendor", "N/A").upper() if audit.get("vendor") else "N/A",
+                "Environment": audit.get("environment", "N/A"),
+                "Risk Score": audit.get("risk_score", 0),
+                "Total Findings": audit.get("total_findings", 0),
+                "Completed At": formatted_date,
+                "_sort_date": sort_date,  # Hidden column for sorting
+            })
+        
+        df_history = pd.DataFrame(history_data)
+        
+        # Sort by risk score (descending) by default, or allow user to sort
+        if not df_history.empty:
+            df_history = df_history.sort_values("Risk Score", ascending=False)
+            # Remove hidden sort column before display
+            df_display = df_history.drop(columns=["_sort_date"])
             
             # Display table
             st.dataframe(
-                df_history,
+                df_display,
                 use_container_width=True,
                 hide_index=True,
                 height=400
             )
             
             # CSV export
-            csv = df_history.to_csv(index=False)
+            csv = df_display.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "📥 Download CSV",
                 data=csv,
-                file_name=f"audit_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                file_name=f"netsec_audit_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
@@ -908,11 +1054,10 @@ with tab3:
                             st.rerun()
                     except Exception as e:
                         st.error(f"Failed to load config: {str(e)}")
-        else:
-            st.info("No audit history found with the selected filters")
-            
-    except Exception as e:
-        st.error(f"Failed to load history: {str(e)}")
+    elif history_result and "items" in history_result and len(history_result["items"]) == 0:
+        st.info("No audits found for the selected filters.")
+    elif not history_result:
+        st.warning("Could not load audit history. Check backend URL and API key.")
 
 # Admin tab
 if tab_admin:

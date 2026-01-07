@@ -1,7 +1,9 @@
 """
 Main FastAPI application entry point.
 """
+import json
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -52,10 +54,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# CORS middleware - support ALLOWED_ORIGINS or CORS_ORIGINS env var for cloud deployment
+allowed_origins = os.getenv("ALLOWED_ORIGINS") or os.getenv("CORS_ORIGINS")
+if allowed_origins:
+    # Parse as comma-separated string or JSON array
+    if allowed_origins.startswith("["):
+        try:
+            allowed_origins = json.loads(allowed_origins)
+        except json.JSONDecodeError:
+            allowed_origins = [origin.strip() for origin in allowed_origins.split(",")]
+    else:
+        allowed_origins = [origin.strip() for origin in allowed_origins.split(",") if origin.strip()]
+else:
+    # Use settings.CORS_ORIGINS as fallback
+    allowed_origins = settings.CORS_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

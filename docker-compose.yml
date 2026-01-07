@@ -2,37 +2,42 @@ version: '3.8'
 
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: netsec-auditor-db
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: netsec_auditor
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-netsec_auditor}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: netsec-auditor-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/netsec_auditor
-      DEBUG: "false"
-      LOG_LEVEL: INFO
-      MAX_UPLOAD_SIZE: 10485760
+      # Database connection - uses postgresql:// format (psycopg2 handles it)
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-netsec_auditor}
+      # Optional: Static API key for initial admin access
+      API_KEY: ${API_KEY:-}
+      # Optional: OpenAI API key for AI-enhanced analysis
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # App settings
+      DEBUG: ${DEBUG:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-10485760}
       UPLOAD_DIR: ./uploads
-      CORS_ORIGINS: '["http://localhost:8501","http://localhost:8000"]'
-      # Optional: Set these in production
-      # API_KEY: ${API_KEY}
-      # OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # CORS - allow Streamlit UI and localhost
+      CORS_ORIGINS: '["http://localhost:8501","http://localhost:8000","http://ui:8501"]'
     ports:
       - "8000:8000"
     volumes:
@@ -43,21 +48,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  streamlit:
+  ui:
     build:
       context: .
       dockerfile: Dockerfile.streamlit
-    container_name: netsec-auditor-streamlit
-    command: streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    container_name: netsec-auditor-ui
     environment:
-      BACKEND_URL: http://api:8000
+      # Backend URL - use service name for Docker networking
+      BACKEND_URL: ${BACKEND_URL:-http://api:8000}
+      # Optional: Pre-fill API key in UI (not recommended for production)
+      # DEFAULT_API_KEY: ${DEFAULT_API_KEY:-}
     ports:
       - "8501:8501"
     depends_on:
       - api
     restart: unless-stopped
-    volumes:
-      - ./streamlit_app.py:/app/streamlit_app.py
+    # Optional: Mount streamlit_app.py for live editing during development
+    # volumes:
+    #   - ./streamlit_app.py:/app/streamlit_app.py
 
 volumes:
   postgres_data:
