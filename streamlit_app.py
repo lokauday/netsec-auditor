@@ -141,16 +141,23 @@ def parse_config(config_id: int) -> Dict[str, Any]:
         raise Exception(f"Parse failed: {str(e)}")
 
 
-def run_audit(config_id: int) -> Dict[str, Any]:
+def run_audit(config_id: int, ai_enabled: bool = False) -> Dict[str, Any]:
     """Run security audit on parsed configuration."""
     url = f"{get_base_url()}/api/v1/audit/{config_id}"
     headers = get_headers()
     
     try:
-        response = requests.post(url, headers=headers, timeout=120)
+        response = requests.post(
+            url,
+            headers=headers,
+            json={"ai_enabled": ai_enabled},
+            timeout=120
+        )
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
+        if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code in [401, 403]:
+            handle_api_error(e)
         raise Exception(f"Audit failed: {str(e)}")
 
 
@@ -466,10 +473,24 @@ with tab1:
                     st.error(f"❌ Parse failed: {str(e)}")
         
         with btn_col2:
+            # AI toggle for re-run
+            ai_enabled_rerun = False
+            try:
+                import os
+                if os.getenv("OPENAI_API_KEY"):
+                    ai_enabled_rerun = st.checkbox(
+                        "🤖 AI-assisted",
+                        value=False,
+                        key="ai_enabled_rerun",
+                        help="Enable AI analysis"
+                    )
+            except:
+                pass
+            
             if st.button("🔒 Re-run Audit", use_container_width=True):
                 try:
                     with st.spinner("Running audit..."):
-                        audit_result = run_audit(st.session_state.config_id)
+                        audit_result = run_audit(st.session_state.config_id, ai_enabled=ai_enabled_rerun)
                         st.session_state.audit_result = audit_result
                         st.success("✅ Audit complete!")
                         st.rerun()
@@ -554,6 +575,14 @@ with tab1:
         summary = audit_result.get("summary", "")
         if summary:
             st.info(f"**Summary:** {summary}")
+        
+        # AI status
+        if audit_result.get("ai_enabled"):
+            ai_count = audit_result.get("ai_findings_count", 0)
+            if ai_count > 0:
+                st.success(f"🤖 AI-assisted analysis enabled: {ai_count} AI recommendation(s) shown.")
+            else:
+                st.info("🤖 AI-assisted analysis enabled: No additional AI findings.")
     
     else:
         st.info("👈 Upload and analyze a configuration file to see risk overview")
@@ -580,12 +609,15 @@ with tab2:
             if selected_severity != "All":
                 filtered_findings = [f for f in findings if f.get("severity", "").lower() == selected_severity.lower()]
             
-            # Create DataFrame
+            # Create DataFrame with Source column
             findings_data = []
             for finding in filtered_findings:
+                code = finding.get("code", "N/A")
+                source = "🤖 AI" if code.startswith("AI_") else "📋 Rule"
                 findings_data.append({
+                    "Source": source,
                     "Severity": format_severity_badge(finding.get("severity", "unknown")),
-                    "Code": finding.get("code", "N/A"),
+                    "Code": code,
                     "Description": finding.get("description", "No description"),
                     "Recommendation": finding.get("recommendation", "No recommendation")
                 })
@@ -715,6 +747,135 @@ with tab3:
                 mime="text/csv",
                 use_container_width=True
             )
+            
+            st.markdown("---")
+            
+            # Compare Audits section
+            st.subheader("🔍 Compare Audits")
+            
+            if len(audits) >= 2:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    baseline_options = {f"{a.get('config_id')} - {a.get('filename', 'N/A')} ({a.get('uploaded_at', '')[:10]})": a for a in audits}
+                    baseline_label = st.selectbox(
+                        "Baseline Audit",
+                        options=[""] + list(baseline_options.keys()),
+                        index=0,
+                        help="Select the baseline audit to compare against"
+                    )
+                
+                with col2:
+                    comparison_options = {f"{a.get('config_id')} - {a.get('filename', 'N/A')} ({a.get('uploaded_at', '')[:10]})": a for a in audits}
+                    comparison_label = st.selectbox(
+                        "Comparison Audit",
+                        options=[""] + list(comparison_options.keys()),
+                        index=0,
+                        help="Select the audit to compare with the baseline"
+                    )
+                
+                if baseline_label and comparison_label and baseline_label != comparison_label:
+                    baseline_audit = baseline_options[baseline_label]
+                    comparison_audit = comparison_options[comparison_label]
+                    
+                    # Get full audit details for both
+                    try:
+                        baseline_detail = get_config_detail(baseline_audit.get("config_id"))
+                        comparison_detail = get_config_detail(comparison_audit.get("config_id"))
+                        
+                        baseline_audit_result = baseline_detail.get("audit_result")
+                        comparison_audit_result = comparison_detail.get("audit_result")
+                        
+                        if baseline_audit_result and comparison_audit_result:
+                            st.markdown("### Comparison Results")
+                            
+                            # Risk score comparison
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric(
+                                    "Baseline Risk Score",
+                                    f"{baseline_audit_result.get('risk_score', 0)}/100",
+                                    delta=None
+                                )
+                            with col2:
+                                risk_diff = comparison_audit_result.get('risk_score', 0) - baseline_audit_result.get('risk_score', 0)
+                                st.metric(
+                                    "Comparison Risk Score",
+                                    f"{comparison_audit_result.get('risk_score', 0)}/100",
+                                    delta=f"{risk_diff:+d}" if risk_diff != 0 else None
+                                )
+                            with col3:
+                                st.metric(
+                                    "Difference",
+                                    f"{abs(risk_diff)}",
+                                    delta="Improved" if risk_diff < 0 else "Worsened" if risk_diff > 0 else "No change"
+                                )
+                            
+                            # Breakdown comparison
+                            baseline_breakdown = baseline_audit_result.get("breakdown", {})
+                            comparison_breakdown = comparison_audit_result.get("breakdown", {})
+                            
+                            st.markdown("#### Findings Breakdown Comparison")
+                            breakdown_data = {
+                                "Severity": ["Critical", "High", "Medium", "Low"],
+                                "Baseline": [
+                                    baseline_breakdown.get("critical", 0),
+                                    baseline_breakdown.get("high", 0),
+                                    baseline_breakdown.get("medium", 0),
+                                    baseline_breakdown.get("low", 0),
+                                ],
+                                "Comparison": [
+                                    comparison_breakdown.get("critical", 0),
+                                    comparison_breakdown.get("high", 0),
+                                    comparison_breakdown.get("medium", 0),
+                                    comparison_breakdown.get("low", 0),
+                                ],
+                            }
+                            breakdown_df = pd.DataFrame(breakdown_data)
+                            st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+                            
+                            # Finding codes comparison
+                            baseline_codes = set(f.get("code", "") for f in baseline_audit_result.get("findings", []))
+                            comparison_codes = set(f.get("code", "") for f in comparison_audit_result.get("findings", []))
+                            
+                            new_findings = comparison_codes - baseline_codes
+                            resolved_findings = baseline_codes - comparison_codes
+                            common_findings = baseline_codes & comparison_codes
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.markdown("**New Findings**")
+                                if new_findings:
+                                    for code in sorted(new_findings)[:10]:
+                                        st.write(f"• {code}")
+                                    if len(new_findings) > 10:
+                                        st.caption(f"... and {len(new_findings) - 10} more")
+                                else:
+                                    st.success("None")
+                            
+                            with col2:
+                                st.markdown("**Resolved Findings**")
+                                if resolved_findings:
+                                    for code in sorted(resolved_findings)[:10]:
+                                        st.write(f"• {code}")
+                                    if len(resolved_findings) > 10:
+                                        st.caption(f"... and {len(resolved_findings) - 10} more")
+                                else:
+                                    st.info("None")
+                            
+                            with col3:
+                                st.markdown("**Common Findings**")
+                                st.metric("Count", len(common_findings))
+                                if common_findings:
+                                    st.caption(f"Examples: {', '.join(sorted(common_findings)[:5])}")
+                        else:
+                            st.warning("One or both audits do not have audit results. Please run audits first.")
+                    except Exception as e:
+                        st.error(f"Failed to load audit details: {str(e)}")
+                elif baseline_label and comparison_label and baseline_label == comparison_label:
+                    st.warning("Please select two different audits to compare.")
+            else:
+                st.info("Need at least 2 audits to compare. Upload and analyze more configurations.")
             
             st.markdown("---")
             

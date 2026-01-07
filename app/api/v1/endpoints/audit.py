@@ -3,9 +3,11 @@ Security audit endpoint.
 """
 import io
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Security
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Security, Body
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.core.config import settings
@@ -21,28 +23,45 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class AuditRequest(BaseModel):
+    """Request body for audit endpoint."""
+    ai_enabled: bool = False
+
+
 @router.post("/{config_file_id}", response_model=AuditResponse)
 async def audit_config_file(
     config_file_id: int,
+    request: Optional[AuditRequest] = Body(None),
     _client = Depends(require_role("read_only")),
     db: Session = Depends(get_db)
 ):
     """
     Perform AI-powered security audit on a parsed configuration file.
     
+    Optional request body:
+    - ai_enabled: bool (default: False) - Enable AI-assisted analysis if OPENAI_API_KEY is configured
+    
     Returns a JSON report with security risks and recommended fixes.
     """
     try:
-        service = AuditService(db)
-        audit_result = service.audit_config(config_file_id)
+        ai_enabled = request.ai_enabled if request else False
         
-        ai_used = settings.is_openai_available()
+        service = AuditService(db)
+        audit_result = service.audit_config(config_file_id, ai_enabled=ai_enabled)
+        
+        # Count AI findings (those with AI_ prefix)
+        ai_findings_count = sum(1 for f in audit_result.get("findings", []) 
+                                if f.get("code", "").startswith("AI_"))
+        
+        audit_result["ai_findings_count"] = ai_findings_count
+        
         logger.info(
             f"Audit completed: config_id={config_file_id}, "
             f"vendor={audit_result.get('vendor')}, "
             f"risk_score={audit_result['risk_score']}, "
             f"findings_count={len(audit_result.get('findings', []))}, "
-            f"ai_enabled={ai_used}"
+            f"ai_enabled={audit_result.get('ai_enabled', False)}, "
+            f"ai_findings_count={ai_findings_count}"
         )
         
         return AuditResponse(**audit_result)

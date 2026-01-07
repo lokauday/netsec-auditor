@@ -17,9 +17,17 @@ class APIKeyResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    last_used_at: Optional[datetime] = None
     key_masked: Optional[str] = None  # First 8 chars + "..."
     
     model_config = {"from_attributes": True}
+
+
+class APIKeyUpdateRequest(BaseModel):
+    """Request schema for updating an API key."""
+    label: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class APIKeyCreateResponse(BaseModel):

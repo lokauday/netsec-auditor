@@ -39,7 +39,7 @@ class AuditService:
         """
         self.db = db
     
-    def audit_config(self, config_file_id: int) -> Dict[str, Any]:
+    def audit_config(self, config_file_id: int, ai_enabled: bool = False) -> Dict[str, Any]:
         """
         Perform security audit on configuration.
         
@@ -66,12 +66,12 @@ class AuditService:
         # Run rule-based security checks
         findings = self._run_rule_based_checks(config_file, acls, nat_rules, routes, interfaces)
         
-        # AI analysis flag
-        ai_enabled = False
+        # AI analysis flag (use parameter if provided)
+        ai_enabled = ai_enabled and settings.is_openai_available()
         ai_summary_enhancement = ""
         
-        # If OpenAI API key is configured, enhance with AI analysis
-        if settings.is_openai_available():
+        # If OpenAI API key is configured and ai_enabled=True, enhance with AI analysis
+        if ai_enabled:
             try:
                 logger.info(f"Running AI-enhanced audit for config file {config_file_id}")
                 
@@ -109,12 +109,23 @@ class AuditService:
                         existing_findings=findings,
                     )
                     
-                    # Add AI findings
+                    # Add AI findings (enforce severity limits: medium/low only)
                     for finding_data in ai_result.get("additional_findings", []):
                         try:
+                            ai_severity = finding_data.get("severity", "low").lower()
+                            # Enforce: AI findings can only be medium or low (no critical/high from AI alone)
+                            if ai_severity in ["critical", "high"]:
+                                ai_severity = "medium"  # Downgrade to medium
+                                logger.debug(f"AI finding severity downgraded from {finding_data.get('severity')} to medium (AI findings limited to medium/low)")
+                            
+                            # Ensure code has AI_ prefix
+                            ai_code = finding_data.get("code", "AI_SUGGESTED_ISSUE")
+                            if not ai_code.startswith("AI_"):
+                                ai_code = f"AI_{ai_code}"
+                            
                             findings.append(SecurityFinding(
-                                severity=finding_data.get("severity", "low"),
-                                code=finding_data.get("code", "AI_SUGGESTED_ISSUE"),
+                                severity=ai_severity,
+                                code=ai_code,
                                 description=finding_data.get("description", "AI-identified security concern"),
                                 recommendation=finding_data.get("recommendation", "Review and remediate"),
                                 affected_objects=finding_data.get("affected_objects", []),
@@ -1065,6 +1076,256 @@ class AuditService:
                             recommendation="Review zone assignments and ensure rules follow the principle of least privilege. Verify that internal-to-untrusted rules are properly scoped.",
                             affected_objects=suspicious_rules[:3],
                         ))
+        
+        # ========== PHASE D CONTINUED: GENERIC ENTERPRISE RULES ==========
+        
+        # GEN_SHADOWED_RULE (MEDIUM) - Generic shadowed rule detection
+        # Only run if vendor-specific shadowed rule didn't already catch it
+        if raw_config_text and acls:
+            existing_codes = [f.code for f in findings]
+            # Skip if ASA_SHADOWED_ACL already found it (ASA-specific)
+            if "GEN_SHADOWED_RULE" not in existing_codes and "ASA_SHADOWED_ACL" not in existing_codes:
+                # Group ACLs by name/interface
+                acl_groups = {}
+                for acl in acls:
+                    acl_name = getattr(acl, "name", None) or getattr(acl, "interface", None) or "default"
+                    if acl_name not in acl_groups:
+                        acl_groups[acl_name] = []
+                    acl_groups[acl_name].append(acl)
+                
+                shadowed_found = False
+                for acl_name, acl_list in acl_groups.items():
+                    if len(acl_list) < 2:
+                        continue
+                    
+                    # Sort by rule_number or sequence
+                    sorted_acls = sorted(acl_list, key=lambda x: getattr(x, "rule_number", 0) or getattr(x, "id", 0))
+                    
+                    # Check if any later rule is shadowed by an earlier broad rule
+                    for i, later_acl in enumerate(sorted_acls[1:], 1):
+                        for earlier_acl in sorted_acls[:i]:
+                            earlier_src = (getattr(earlier_acl, "source", "") or "").lower()
+                            earlier_dst = (getattr(earlier_acl, "destination", "") or "").lower()
+                            earlier_action = (getattr(earlier_acl, "action", "") or "").lower()
+                            
+                            later_src = (getattr(later_acl, "source", "") or "").lower()
+                            later_dst = (getattr(later_acl, "destination", "") or "").lower()
+                            
+                            # If earlier rule is "any any" with permit, later more specific rules are shadowed
+                            if (earlier_src == "any" and earlier_dst == "any" and 
+                                earlier_action in ["permit", "allow"]):
+                                # Later rule is shadowed if it's more specific (not "any any")
+                                if later_src != "any" or later_dst != "any":
+                                    shadowed_found = True
+                                    findings.append(SecurityFinding(
+                                        severity="medium",
+                                        code="GEN_SHADOWED_RULE",
+                                        description=f"ACL '{acl_name}' contains shadowed rules: rule at position {i+1} is unreachable due to earlier 'any any' permit rule.",
+                                        recommendation="Reorder ACL rules so that specific rules come before general 'any any' rules. Remove unreachable shadowed rules.",
+                                        affected_objects=[f"ACL: {acl_name}", f"Shadowed rule: {getattr(later_acl, 'raw_config', 'N/A')[:60]}"],
+                                    ))
+                                    break
+                        if shadowed_found:
+                            break
+                    if shadowed_found:
+                        break
+        
+        # GEN_OVERLAPPING_ACL (MEDIUM) - Generic overlapping rule detection
+        if raw_config_text and acls:
+            existing_codes = [f.code for f in findings]
+            if "GEN_OVERLAPPING_ACL" not in existing_codes:
+                # Group ACLs by name
+                acl_groups = {}
+                for acl in acls:
+                    acl_name = getattr(acl, "name", None) or "default"
+                    if acl_name not in acl_groups:
+                        acl_groups[acl_name] = []
+                    acl_groups[acl_name].append(acl)
+                
+                overlapping_found = False
+                for acl_name, acl_list in acl_groups.items():
+                    if len(acl_list) < 2:
+                        continue
+                    
+                    # Check for duplicate or very similar rules
+                    seen_rules = {}
+                    for acl in acl_list:
+                        src = (getattr(acl, "source", "") or "").lower()
+                        dst = (getattr(acl, "destination", "") or "").lower()
+                        proto = (getattr(acl, "protocol", "") or "").lower()
+                        port = (getattr(acl, "port", "") or "").lower()
+                        action = (getattr(acl, "action", "") or "").lower()
+                        
+                        rule_key = (src, dst, proto, port, action)
+                        if rule_key in seen_rules:
+                            overlapping_found = True
+                            findings.append(SecurityFinding(
+                                severity="medium",
+                                code="GEN_OVERLAPPING_ACL",
+                                description=f"ACL '{acl_name}' contains duplicate or overlapping rules with identical source, destination, protocol, and port conditions.",
+                                recommendation="Consolidate duplicate rules. Remove redundant ACL entries to improve performance and maintainability.",
+                                affected_objects=[f"ACL: {acl_name}", f"Overlapping rule: {getattr(acl, 'raw_config', 'N/A')[:60]}"],
+                            ))
+                            break
+                        seen_rules[rule_key] = acl
+                    if overlapping_found:
+                        break
+        
+        # GEN_UNUSED_OBJECT (LOW) - Generic unused object detection
+        if raw_config_text:
+            existing_codes = [f.code for f in findings]
+            if "GEN_UNUSED_OBJECT" not in existing_codes:
+                unused_objects = []
+                
+                # ASA: Check for unused object-groups
+                if vendor == "cisco_asa" and "object-group" in combined_text:
+                    lines = raw_config_text.split('\n')
+                    object_groups = []
+                    current_group = None
+                    
+                    for line in lines:
+                        line_lower = line.strip().lower()
+                        if line_lower.startswith("object-group"):
+                            parts = line_lower.split()
+                            if len(parts) >= 3:
+                                current_group = parts[2]
+                                object_groups.append(current_group)
+                        elif line_lower and not (line_lower.startswith(' ') or line_lower.startswith('\t')):
+                            current_group = None
+                    
+                    # Check if object-groups are referenced in ACLs
+                    for group in object_groups[:10]:  # Limit check
+                        if group and f"object-group {group}" not in combined_text.replace(f"object-group {group}", "", 1):
+                            # Check if referenced elsewhere
+                            if group not in combined_text.replace(f"object-group {group}", "", 1):
+                                unused_objects.append(f"object-group: {group}")
+                
+                # Fortinet/Palo: Similar logic for address objects
+                elif vendor in ["fortinet", "palo_alto"]:
+                    # Already handled in vendor-specific rules above
+                    pass
+                
+                if unused_objects:
+                    findings.append(SecurityFinding(
+                        severity="low",
+                        code="GEN_UNUSED_OBJECT",
+                        description=f"Unused objects detected: {', '.join(unused_objects[:5])}. These may indicate configuration drift or abandoned changes.",
+                        recommendation="Review and remove unused objects to reduce configuration complexity and potential security risks.",
+                        affected_objects=unused_objects[:5],
+                    ))
+        
+        # GEN_WEAK_CRYPTO_SUITE (HIGH) - Generic weak crypto detection
+        if raw_config_text:
+            existing_codes = [f.code for f in findings]
+            if "GEN_WEAK_CRYPTO_SUITE" not in existing_codes:
+                weak_crypto_found = False
+                weak_patterns = [
+                    "des", "3des", "md5", "sha1",
+                    "dh group 1", "dh group 2", "dh group 5",
+                    "group 1", "group 2", "group 5",
+                ]
+                
+                # Check for weak crypto in config
+                for pattern in weak_patterns:
+                    if f" {pattern} " in combined_text or f" {pattern}\n" in combined_text:
+                        weak_crypto_found = True
+                        break
+                
+                if weak_crypto_found:
+                    findings.append(SecurityFinding(
+                        severity="high",
+                        code="GEN_WEAK_CRYPTO_SUITE",
+                        description="Configuration uses weak cryptographic algorithms (DES, 3DES, MD5, SHA-1) or weak Diffie-Hellman groups (1, 2, 5).",
+                        recommendation="Migrate to modern crypto suites: AES-256 or AES-GCM for encryption, SHA-256+ for hashing, and DH group 14+ or ECDH for key exchange.",
+                        affected_objects=["Crypto/VPN/SSL configuration"],
+                    ))
+        
+        # GEN_NAT_MISCONFIG (HIGH) - NAT misconfiguration patterns
+        if raw_config_text and nat_rules:
+            existing_codes = [f.code for f in findings]
+            if "GEN_NAT_MISCONFIG" not in existing_codes:
+                nat_issues = []
+                
+                for nat in nat_rules:
+                    # NAT to 0.0.0.0/0 (any)
+                    if nat.destination_translated and ("0.0.0.0" in nat.destination_translated or "any" in nat.destination_translated.lower()):
+                        nat_issues.append(f"NAT rule '{nat.rule_name or nat.id}' translates to 0.0.0.0/any")
+                    
+                    # NATting RFC1918 to public without proper ACL
+                    if nat.source_original and self._is_private_network(nat.source_original):
+                        if nat.source_translated and not self._is_private_network(nat.source_translated):
+                            # Private to public NAT - check if there are restrictive ACLs
+                            # Simple heuristic: if we have any-any rules, this is risky
+                            if any("permit ip any any" in combined_text or "permit tcp any any" in combined_text for _ in [1]):
+                                nat_issues.append(f"NAT rule '{nat.rule_name or nat.id}' exposes private network {nat.source_original} to public")
+                
+                if nat_issues:
+                    findings.append(SecurityFinding(
+                        severity="high",
+                        code="GEN_NAT_MISCONFIG",
+                        description=f"NAT misconfiguration detected: {', '.join(nat_issues[:3])}. This may expose internal networks or create routing issues.",
+                        recommendation="Review NAT rules and ensure proper ACLs restrict traffic. Avoid NAT to 0.0.0.0/any. Verify private-to-public NAT has appropriate restrictions.",
+                        affected_objects=nat_issues[:3],
+                    ))
+        
+        # GEN_RFC1918_INBOUND_FROM_OUTSIDE (CRITICAL) - Inbound allow to RFC1918 from outside
+        if raw_config_text and acls:
+            existing_codes = [f.code for f in findings]
+            if "GEN_RFC1918_INBOUND_FROM_OUTSIDE" not in existing_codes:
+                rfc1918_inbound_found = False
+                
+                # Check ACLs for inbound rules allowing RFC1918 from outside
+                for acl in acls:
+                    acl_direction = (getattr(acl, "direction", "") or "").lower()
+                    acl_action = (getattr(acl, "action", "") or "").lower()
+                    acl_dst = (getattr(acl, "destination", "") or "")
+                    
+                    # Check if this is an inbound rule (in/inside direction)
+                    if acl_direction in ["in", "inbound", "inside"] and acl_action in ["permit", "allow"]:
+                        # Check if destination is RFC1918
+                        if acl_dst and self._is_private_network(acl_dst):
+                            # Check if source is outside/public
+                            acl_src = (getattr(acl, "source", "") or "").lower()
+                            if acl_src in ["any", "0.0.0.0/0"] or (acl_src and not self._is_private_network(acl_src)):
+                                rfc1918_inbound_found = True
+                                findings.append(SecurityFinding(
+                                    severity="critical",
+                                    code="GEN_RFC1918_INBOUND_FROM_OUTSIDE",
+                                    description=f"Inbound ACL rule allows traffic to private network {acl_dst} from outside/public source {acl_src}. This exposes internal resources to the internet.",
+                                    recommendation="Remove or restrict inbound rules allowing access to RFC1918 addresses from outside. Use VPN or out-of-band management instead.",
+                                    affected_objects=[f"ACL: {getattr(acl, 'name', 'unnamed')}", f"Rule: {getattr(acl, 'raw_config', 'N/A')[:60]}"],
+                                ))
+                                break
+                
+                # Also check raw config for patterns
+                if not rfc1918_inbound_found and raw_config_text:
+                    # Look for permit rules with private IPs as destination
+                    lines = raw_config_text.split('\n')
+                    for line in lines:
+                        line_lower = line.strip().lower()
+                        if ("permit" in line_lower or "allow" in line_lower) and "access-list" in line_lower:
+                            # Check for private IP patterns
+                            import re
+                            private_patterns = [
+                                r"10\.\d+\.\d+\.\d+",
+                                r"172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+",
+                                r"192\.168\.\d+\.\d+",
+                            ]
+                            for pattern in private_patterns:
+                                if re.search(pattern, line):
+                                    # Check if source is any/outside
+                                    if "any" in line_lower or "0.0.0.0" in line_lower:
+                                        rfc1918_inbound_found = True
+                                        findings.append(SecurityFinding(
+                                            severity="critical",
+                                            code="GEN_RFC1918_INBOUND_FROM_OUTSIDE",
+                                            description="Inbound ACL rule allows traffic to private network from outside/public source (any/0.0.0.0). This exposes internal resources to the internet.",
+                                            recommendation="Remove or restrict inbound rules allowing access to RFC1918 addresses from outside. Use VPN or out-of-band management instead.",
+                                            affected_objects=[f"Config line: {line[:60]}"],
+                                        ))
+                                        break
+                            if rfc1918_inbound_found:
+                                break
         
         # ========== END PHASE D CHECKS ==========
         

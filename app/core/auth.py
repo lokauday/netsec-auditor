@@ -67,13 +67,24 @@ def get_current_api_client(
         logger.debug("Authenticated with static API key")
         return APIClient(source="static", role="admin")
     
-    # Then, check database API keys
-    db_key = db.query(APIKey).filter(
-        APIKey.key == api_key,
-        APIKey.is_active == True
-    ).first()
+    # Then, check database API keys (using hash comparison)
+    from app.api.v1.endpoints.api_keys import hash_api_key, verify_api_key_hash
+    
+    # Get all active keys and verify hash
+    active_keys = db.query(APIKey).filter(APIKey.is_active == True).all()
+    db_key = None
+    
+    for key in active_keys:
+        if verify_api_key_hash(api_key, key.key_hash):
+            db_key = key
+            break
     
     if db_key:
+        # Update last_used_at
+        from datetime import datetime, timezone
+        db_key.last_used_at = datetime.now(timezone.utc)
+        db.commit()
+        
         logger.debug(f"Authenticated with DB API key: {db_key.label or db_key.id} (role: {db_key.role})")
         return APIClient(source="db", role=db_key.role)
     

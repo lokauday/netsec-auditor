@@ -6,6 +6,7 @@ from fastapi import status
 from unittest.mock import patch
 
 from app.models.api_key import APIKey
+from app.api.v1.endpoints.api_keys import hash_api_key
 
 # Minimal valid ASA config for testing
 SAMPLE_ASA_CONFIG = """hostname test-asa
@@ -54,9 +55,10 @@ def test_upload_with_invalid_api_key_fails(client_with_auth):
 
 def test_upload_with_db_api_key_succeeds(client_with_auth, db_session):
     """Test that requests with valid DB API key succeed."""
-    # Create a DB API key
+    # Create a DB API key with hashed key
+    raw_key = "db-test-key-12345"
     db_key = APIKey(
-        key="db-test-key-12345",
+        key_hash=hash_api_key(raw_key),
         label="Test DB Key",
         role="read_only",
         is_active=True
@@ -67,7 +69,7 @@ def test_upload_with_db_api_key_succeeds(client_with_auth, db_session):
     response = client_with_auth.post(
         "/api/v1/upload/",
         files={"file": ("test_config.txt", SAMPLE_ASA_CONFIG.encode(), "text/plain")},
-        headers={"X-API-Key": "db-test-key-12345"}
+        headers={"X-API-Key": raw_key}
     )
     
     assert response.status_code == status.HTTP_201_CREATED
@@ -76,9 +78,10 @@ def test_upload_with_db_api_key_succeeds(client_with_auth, db_session):
 
 def test_read_only_role_can_access_endpoints(client_with_auth, db_session):
     """Test that read_only role can access endpoints requiring read_only."""
-    # Create a read_only DB API key
+    # Create a read_only DB API key with hashed key
+    raw_key = "readonly-key-12345"
     db_key = APIKey(
-        key="readonly-key-12345",
+        key_hash=hash_api_key(raw_key),
         label="Read Only Key",
         role="read_only",
         is_active=True
@@ -90,7 +93,7 @@ def test_read_only_role_can_access_endpoints(client_with_auth, db_session):
     response = client_with_auth.post(
         "/api/v1/upload/",
         files={"file": ("test_config.txt", SAMPLE_ASA_CONFIG.encode(), "text/plain")},
-        headers={"X-API-Key": "readonly-key-12345"}
+        headers={"X-API-Key": raw_key}
     )
     
     assert response.status_code == status.HTTP_201_CREATED
@@ -110,9 +113,10 @@ def test_admin_role_can_access_endpoints(client_with_auth):
 
 def test_inactive_db_key_fails(client_with_auth, db_session):
     """Test that inactive DB API keys are rejected."""
-    # Create an inactive DB API key
+    # Create an inactive DB API key with hashed key
+    raw_key = "inactive-key-12345"
     db_key = APIKey(
-        key="inactive-key-12345",
+        key_hash=hash_api_key(raw_key),
         label="Inactive Key",
         role="read_only",
         is_active=False
@@ -123,7 +127,7 @@ def test_inactive_db_key_fails(client_with_auth, db_session):
     response = client_with_auth.post(
         "/api/v1/upload/",
         files={"file": ("test_config.txt", b"test content", "text/plain")},
-        headers={"X-API-Key": "inactive-key-12345"}
+        headers={"X-API-Key": raw_key}
     )
     
     assert response.status_code == status.HTTP_401_UNAUTHORIZED

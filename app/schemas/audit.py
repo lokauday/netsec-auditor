@@ -25,6 +25,8 @@ class AuditResponse(BaseModel):
     breakdown: AuditBreakdown
     summary: str
     findings: List[Dict[str, Any]]  # List of SecurityFinding dicts
+    ai_enabled: bool = False
+    ai_findings_count: int = 0
 
 
 class AuditRecordSummary(BaseModel):
