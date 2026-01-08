@@ -120,6 +120,9 @@ async def upload_config_file(
             location=config_file.location,
             device_id=config_file.device_id,
         )
+    except HTTPException:
+        # Re-raise HTTPExceptions (like validation errors) as-is
+        raise
     except ValueError as e:
         logger.error(f"Validation error during upload: {e}")
         raise HTTPException(
