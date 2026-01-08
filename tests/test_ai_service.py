@@ -10,7 +10,7 @@ from app.core.config import settings
 @pytest.fixture
 def mock_openai_client():
     """Mock OpenAI client."""
-    with patch('app.services.ai_service.OpenAI') as mock_openai:
+    with patch('openai.OpenAI') as mock_openai:
         mock_client = MagicMock()
         mock_openai.return_value = mock_client
         yield mock_client
@@ -27,20 +27,25 @@ class TestAIService:
     
     def test_is_available_without_openai_key(self, ai_service):
         """Test that AI service is not available without OpenAI key."""
-        with patch.object(settings, 'is_openai_available', return_value=False):
+        with patch('app.services.ai_service.settings.is_openai_available', return_value=False):
             assert ai_service.is_available() is False
     
     def test_is_available_with_openai_key(self, ai_service, mock_openai_client):
         """Test that AI service is available with OpenAI key."""
-        with patch.object(settings, 'is_openai_available', return_value=True):
-            with patch.object(settings, 'OPENAI_API_KEY', 'test-key'):
+        with patch('app.services.ai_service.settings.is_openai_available', return_value=True):
+            with patch('app.services.ai_service.settings.OPENAI_API_KEY', 'test-key'):
+                # Reset client to force re-initialization
+                ai_service._client = None
                 assert ai_service.is_available() is True
     
     def test_explain_finding_success(self, ai_service, mock_openai_client):
         """Test successful finding explanation."""
-        with patch.object(settings, 'is_openai_available', return_value=True):
-            with patch.object(settings, 'OPENAI_API_KEY', 'test-key'):
-                with patch.object(settings, 'OPENAI_MODEL', 'gpt-4'):
+        with patch('app.services.ai_service.settings.is_openai_available', return_value=True):
+            with patch('app.services.ai_service.settings.OPENAI_API_KEY', 'test-key'):
+                with patch('app.services.ai_service.settings.OPENAI_MODEL', 'gpt-4'):
+                    # Reset client to force re-initialization
+                    ai_service._client = None
+                    
                     # Mock OpenAI response
                     mock_response = MagicMock()
                     mock_response.choices = [MagicMock()]
@@ -61,8 +66,11 @@ class TestAIService:
     
     def test_explain_finding_handles_errors(self, ai_service, mock_openai_client):
         """Test that explain_finding handles errors gracefully."""
-        with patch.object(settings, 'is_openai_available', return_value=True):
-            with patch.object(settings, 'OPENAI_API_KEY', 'test-key'):
+        with patch('app.services.ai_service.settings.is_openai_available', return_value=True):
+            with patch('app.services.ai_service.settings.OPENAI_API_KEY', 'test-key'):
+                # Reset client to force re-initialization
+                ai_service._client = None
+                
                 # Mock OpenAI to raise exception
                 mock_openai_client.chat.completions.create.side_effect = Exception("API Error")
                 
@@ -81,9 +89,12 @@ class TestAIService:
     
     def test_suggest_rule_success(self, ai_service, mock_openai_client):
         """Test successful rule suggestion."""
-        with patch.object(settings, 'is_openai_available', return_value=True):
-            with patch.object(settings, 'OPENAI_API_KEY', 'test-key'):
-                with patch.object(settings, 'OPENAI_MODEL', 'gpt-4'):
+        with patch('app.services.ai_service.settings.is_openai_available', return_value=True):
+            with patch('app.services.ai_service.settings.OPENAI_API_KEY', 'test-key'):
+                with patch('app.services.ai_service.settings.OPENAI_MODEL', 'gpt-4'):
+                    # Reset client to force re-initialization
+                    ai_service._client = None
+                    
                     # Mock OpenAI response
                     mock_response = MagicMock()
                     mock_response.choices = [MagicMock()]
@@ -101,14 +112,17 @@ class TestAIService:
     
     def test_suggest_rule_without_openai_key(self, ai_service):
         """Test that suggest_rule raises error without OpenAI key."""
-        with patch.object(settings, 'is_openai_available', return_value=False):
+        with patch('app.services.ai_service.settings.is_openai_available', return_value=False):
             with pytest.raises(ValueError, match="OpenAI API key not configured"):
                 ai_service.suggest_rule("Test description")
     
     def test_suggest_rule_handles_errors(self, ai_service, mock_openai_client):
         """Test that suggest_rule handles errors."""
-        with patch.object(settings, 'is_openai_available', return_value=True):
-            with patch.object(settings, 'OPENAI_API_KEY', 'test-key'):
+        with patch('app.services.ai_service.settings.is_openai_available', return_value=True):
+            with patch('app.services.ai_service.settings.OPENAI_API_KEY', 'test-key'):
+                # Reset client to force re-initialization
+                ai_service._client = None
+                
                 # Mock OpenAI to raise exception
                 mock_openai_client.chat.completions.create.side_effect = Exception("API Error")
                 
