@@ -593,8 +593,8 @@ with tab1:
         risk_score = audit_result.get("risk_score", 0)
         risk_color = get_risk_score_color(risk_score)
         
-        # Risk Score Metric
-        col1, col2 = st.columns([1, 2])
+        # Risk Score and Hygiene Score Metrics
+        col1, col1b, col2 = st.columns([1, 1, 2])
         
         with col1:
             st.metric(
@@ -613,6 +613,41 @@ with tab1:
                 f'<div style="width: 100%; height: 20px; background-color: {color_hex}; border-radius: 5px;"></div>',
                 unsafe_allow_html=True
             )
+        
+        with col1b:
+            hygiene_score = audit_result.get("policy_hygiene_score")
+            if hygiene_score is not None:
+                hygiene_color = "green" if hygiene_score >= 80 else ("yellow" if hygiene_score >= 60 else ("orange" if hygiene_score >= 40 else "red"))
+                st.metric(
+                    label="Policy Hygiene Score",
+                    value=f"{hygiene_score:.1f}/100",
+                    delta=None
+                )
+                hygiene_color_hex = {
+                    "green": "#28a745",
+                    "yellow": "#ffc107",
+                    "orange": "#fd7e14",
+                    "red": "#dc3545"
+                }[hygiene_color]
+                st.markdown(
+                    f'<div style="width: 100%; height: 20px; background-color: {hygiene_color_hex}; border-radius: 5px;"></div>',
+                    unsafe_allow_html=True
+                )
+                
+                # Show hygiene metrics if available
+                hygiene_metrics = audit_result.get("hygiene_metrics", {})
+                if hygiene_metrics:
+                    with st.expander("📊 Hygiene Details"):
+                        st.write(f"**Redundant Rules:** {hygiene_metrics.get('redundant_rules', 0)}")
+                        st.write(f"**Shadowed Rules:** {hygiene_metrics.get('shadowed_rules', 0)}")
+                        st.write(f"**Unused Objects:** {hygiene_metrics.get('unused_objects', 0)}")
+                        st.write(f"**Total Rules:** {hygiene_metrics.get('total_rules', 0)}")
+            else:
+                st.metric(
+                    label="Policy Hygiene Score",
+                    value="N/A",
+                    delta=None
+                )
         
         with col2:
             # Severity Breakdown Chart
@@ -655,6 +690,34 @@ with tab1:
                 st.success(f"🤖 AI-assisted analysis enabled: {ai_count} AI recommendation(s) shown.")
             else:
                 st.info("🤖 AI-assisted analysis enabled: No additional AI findings.")
+        
+        # Policy Hygiene Details
+        hygiene_metrics = audit_result.get("hygiene_metrics", {})
+        if hygiene_metrics and hygiene_metrics.get("total_rules", 0) > 0:
+            st.markdown("---")
+            st.subheader("🧹 Policy Hygiene Analysis")
+            hygiene_col1, hygiene_col2, hygiene_col3, hygiene_col4 = st.columns(4)
+            with hygiene_col1:
+                st.metric("Redundant Rules", hygiene_metrics.get("redundant_rules", 0))
+            with hygiene_col2:
+                st.metric("Shadowed Rules", hygiene_metrics.get("shadowed_rules", 0))
+            with hygiene_col3:
+                st.metric("Unused Objects", hygiene_metrics.get("unused_objects", 0))
+            with hygiene_col4:
+                st.metric("Total Rules", hygiene_metrics.get("total_rules", 0))
+            
+            # Show hygiene details if available
+            hygiene_details = hygiene_metrics.get("details", [])
+            if hygiene_details:
+                with st.expander("📋 View Hygiene Details"):
+                    for detail in hygiene_details[:10]:  # Show first 10
+                        detail_type = detail.get("type", "unknown")
+                        if detail_type == "redundant":
+                            st.warning(f"**Redundant Rule:** {detail.get('rule', 'N/A')} in ACL {detail.get('acl', 'N/A')}")
+                        elif detail_type == "shadowed":
+                            st.error(f"**Shadowed Rule:** {detail.get('rule', 'N/A')} in ACL {detail.get('acl', 'N/A')} (shadowed by: {detail.get('shadowed_by', 'N/A')})")
+                        elif detail_type == "unused_object":
+                            st.info(f"**Unused Object:** {detail.get('object', 'N/A')}")
     
     else:
         st.info("👈 Upload and analyze a configuration file to see risk overview")
@@ -1196,6 +1259,37 @@ with tab_devices:
     if st.button("🔄 Refresh", use_container_width=False, key="device_refresh"):
         st.rerun()
     
+    # Hygiene distribution chart
+    st.subheader("📊 Hygiene Score Distribution")
+    devices_data_for_chart = list_devices()  # Get all devices for chart
+    if devices_data_for_chart.get("items"):
+        hygiene_scores = [d.get("last_policy_hygiene_score") for d in devices_data_for_chart["items"] if d.get("last_policy_hygiene_score") is not None]
+        if hygiene_scores:
+            hygiene_df = pd.DataFrame({"Hygiene Score": hygiene_scores})
+            st.bar_chart(hygiene_df, height=200)
+            
+            # Top worst devices by hygiene
+            worst_devices = sorted(
+                [d for d in devices_data_for_chart["items"] if d.get("last_policy_hygiene_score") is not None],
+                key=lambda x: x.get("last_policy_hygiene_score", 100)
+            )[:5]
+            
+            if worst_devices:
+                st.markdown("**🔴 Top 5 Worst Hygiene Scores:**")
+                worst_df_data = []
+                for device in worst_devices:
+                    worst_df_data.append({
+                        "Hostname": device.get("hostname", "N/A"),
+                        "Hygiene Score": f"{device.get('last_policy_hygiene_score', 0):.1f}",
+                        "Risk Score": f"{device.get('last_risk_score', 'N/A')}",
+                    })
+                worst_df = pd.DataFrame(worst_df_data)
+                st.dataframe(worst_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No hygiene scores available yet. Run audits to generate scores.")
+    
+    st.markdown("---")
+    
     # List devices
     devices_data = list_devices(
         site=filter_site if filter_site else None,
@@ -1210,6 +1304,10 @@ with tab_devices:
             risk_display = f"{risk_score:.1f}" if risk_score is not None else "N/A"
             risk_color = "🔴" if risk_score and risk_score >= 70 else ("🟡" if risk_score and risk_score >= 40 else ("🟢" if risk_score is not None else "⚪"))
             
+            hygiene_score = device.get("last_policy_hygiene_score")
+            hygiene_display = f"{hygiene_score:.1f}" if hygiene_score is not None else "N/A"
+            hygiene_color = "🟢" if hygiene_score and hygiene_score >= 80 else ("🟡" if hygiene_score and hygiene_score >= 60 else ("🟠" if hygiene_score and hygiene_score >= 40 else ("🔴" if hygiene_score is not None else "⚪")))
+            
             devices_df_data.append({
                 "ID": device.get("id"),
                 "Hostname": device.get("hostname", "N/A"),
@@ -1218,6 +1316,7 @@ with tab_devices:
                 "Site": device.get("site", "N/A"),
                 "Environment": device.get("environment", "N/A"),
                 "Risk Score": f"{risk_color} {risk_display}",
+                "Hygiene Score": f"{hygiene_color} {hygiene_display}",
                 "Owner": device.get("owner", "N/A"),
             })
         

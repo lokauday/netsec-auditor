@@ -21,6 +21,8 @@ class AuditResponse(BaseModel):
     vendor: str
     filename: str
     risk_score: int
+    policy_hygiene_score: Optional[float] = None
+    hygiene_metrics: Optional[Dict[str, Any]] = None
     total_findings: int
     breakdown: AuditBreakdown
     summary: str

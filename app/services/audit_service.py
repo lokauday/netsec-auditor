@@ -150,6 +150,10 @@ class AuditService:
         risk_score = self._calculate_risk_score(findings)
         breakdown = self._calculate_breakdown(findings)
         
+        # Calculate policy hygiene score
+        hygiene_metrics = self._analyze_policy_hygiene(config_file, acls, nat_rules, routes, interfaces)
+        hygiene_score = self._calculate_hygiene_score(hygiene_metrics)
+        
         # Generate summary (enhance with AI if available)
         summary = self._generate_summary(findings, risk_score)
         if ai_enabled and ai_summary_enhancement:
@@ -171,13 +175,25 @@ class AuditService:
         self.db.commit()
         self.db.refresh(audit_record)
         
-        logger.info(f"Saved audit record {audit_record.id} for config_file_id={config_file_id}")
+        # Update device's last audit and scores if device is linked
+        if config_file.device_id:
+            from app.models.device import Device
+            device = self.db.query(Device).filter(Device.id == config_file.device_id).first()
+            if device:
+                device.last_audit_id = audit_record.id
+                device.last_risk_score = risk_score
+                device.last_policy_hygiene_score = hygiene_score
+                self.db.commit()
+        
+        logger.info(f"Saved audit record {audit_record.id} for config_file_id={config_file_id}, hygiene_score={hygiene_score}")
         
         return {
             "config_file_id": config_file_id,
             "vendor": config_file.vendor.value,
             "filename": config_file.filename,
             "risk_score": risk_score,
+            "policy_hygiene_score": hygiene_score,
+            "hygiene_metrics": hygiene_metrics,
             "total_findings": len(findings),
             "breakdown": breakdown,
             "summary": summary,
@@ -1774,3 +1790,173 @@ Focus on:
         
         # Default: if no specific criteria match, return False
         return False
+    
+    def _analyze_policy_hygiene(
+        self,
+        config_file: ConfigFile,
+        acls: List[ACL],
+        nat_rules: List[NATRule],
+        routes: List[Route],
+        interfaces: List[Interface],
+    ) -> Dict[str, Any]:
+        """
+        Analyze policy hygiene and return metrics.
+        
+        Detects:
+        - Redundant rules (duplicate rules)
+        - Shadowed rules (rules that can never be reached)
+        - Unused/disabled objects
+        - Unreferenced groups
+        
+        Returns:
+            Dictionary with hygiene metrics
+        """
+        metrics = {
+            "redundant_rules": 0,
+            "shadowed_rules": 0,
+            "unused_objects": 0,
+            "unreferenced_groups": 0,
+            "total_rules": len(acls),
+            "details": [],
+        }
+        
+        if not acls:
+            return metrics
+        
+        # Group ACLs by name for analysis
+        acl_groups = {}
+        for acl in acls:
+            acl_name = acl.name or "default"
+            if acl_name not in acl_groups:
+                acl_groups[acl_name] = []
+            acl_groups[acl_name].append(acl)
+        
+        # Analyze each ACL group
+        for acl_name, acl_list in acl_groups.items():
+            if len(acl_list) < 2:
+                continue
+            
+            # Sort by rule_number if available
+            sorted_acls = sorted(acl_list, key=lambda x: getattr(x, "rule_number", 0) or 0)
+            
+            # 1. Detect redundant rules (exact duplicates)
+            seen_rules = set()
+            for acl in sorted_acls:
+                rule_key = (
+                    str(acl.source or "").lower(),
+                    str(acl.destination or "").lower(),
+                    str(acl.protocol or "").lower(),
+                    str(acl.port or "").lower(),
+                    str(acl.action or "").lower(),
+                )
+                if rule_key in seen_rules:
+                    metrics["redundant_rules"] += 1
+                    metrics["details"].append({
+                        "type": "redundant",
+                        "acl": acl_name,
+                        "rule": getattr(acl, "raw_config", "N/A")[:60] if hasattr(acl, "raw_config") else "N/A",
+                    })
+                else:
+                    seen_rules.add(rule_key)
+            
+            # 2. Detect shadowed rules (rules that can never be reached)
+            for i, later_acl in enumerate(sorted_acls[1:], 1):
+                for earlier_acl in sorted_acls[:i]:
+                    earlier_src = (getattr(earlier_acl, "source", "") or "").lower()
+                    earlier_dst = (getattr(earlier_acl, "destination", "") or "").lower()
+                    earlier_proto = (getattr(earlier_acl, "protocol", "") or "").lower()
+                    earlier_action = (getattr(earlier_acl, "action", "") or "").lower()
+                    
+                    later_src = (getattr(later_acl, "source", "") or "").lower()
+                    later_dst = (getattr(later_acl, "destination", "") or "").lower()
+                    later_proto = (getattr(later_acl, "protocol", "") or "").lower()
+                    
+                    # Check if earlier rule shadows later rule
+                    # Shadowing occurs when earlier rule matches everything later rule matches
+                    if earlier_action == "permit" and earlier_proto in ["ip", "tcp", "udp"]:
+                        # If earlier is "any any" and protocols match, later is shadowed
+                        if (earlier_src == "any" and earlier_dst == "any" and 
+                            earlier_proto == later_proto):
+                            metrics["shadowed_rules"] += 1
+                            metrics["details"].append({
+                                "type": "shadowed",
+                                "acl": acl_name,
+                                "rule": getattr(later_acl, "raw_config", "N/A")[:60] if hasattr(later_acl, "raw_config") else "N/A",
+                                "shadowed_by": getattr(earlier_acl, "raw_config", "N/A")[:60] if hasattr(earlier_acl, "raw_config") else "N/A",
+                            })
+                            break
+                        # If earlier rule is more general (any source/dest) and protocols match
+                        elif (earlier_src == "any" or earlier_dst == "any") and earlier_proto == later_proto:
+                            # Check if later rule is more specific but still matches
+                            if ((earlier_src == "any" or earlier_src == later_src) and
+                                (earlier_dst == "any" or earlier_dst == later_dst)):
+                                metrics["shadowed_rules"] += 1
+                                metrics["details"].append({
+                                    "type": "shadowed",
+                                    "acl": acl_name,
+                                    "rule": getattr(later_acl, "raw_config", "N/A")[:60] if hasattr(later_acl, "raw_config") else "N/A",
+                                    "shadowed_by": getattr(earlier_acl, "raw_config", "N/A")[:60] if hasattr(earlier_acl, "raw_config") else "N/A",
+                                })
+                                break
+        
+        # 3. Detect unused/disabled objects (simplified - check for disabled interfaces)
+        for interface in interfaces:
+            # Check if interface is shutdown/disabled
+            if hasattr(interface, "raw_config") and interface.raw_config:
+                raw_lower = interface.raw_config.lower()
+                if "shutdown" in raw_lower or "disabled" in raw_lower:
+                    # Check if any ACL references this interface
+                    interface_referenced = False
+                    for acl in acls:
+                        if hasattr(acl, "raw_config") and acl.raw_config:
+                            if interface.name and interface.name.lower() in acl.raw_config.lower():
+                                interface_referenced = True
+                                break
+                    if not interface_referenced:
+                        metrics["unused_objects"] += 1
+                        metrics["details"].append({
+                            "type": "unused_object",
+                            "object": f"Interface: {interface.name}",
+                        })
+        
+        # 4. Unreferenced groups (simplified - would need to parse group definitions)
+        # For now, we'll skip this as it requires parsing group/object-group definitions
+        
+        return metrics
+    
+    def _calculate_hygiene_score(self, hygiene_metrics: Dict[str, Any]) -> float:
+        """
+        Calculate policy hygiene score (0-100).
+        
+        Higher score = better hygiene.
+        Penalties:
+        - Redundant rule: -2 points
+        - Shadowed rule: -3 points
+        - Unused object: -1 point
+        - Unreferenced group: -1 point (not implemented yet)
+        
+        Base score: 100
+        """
+        base_score = 100.0
+        total_rules = hygiene_metrics.get("total_rules", 1)
+        
+        # Normalize penalties by total rules to avoid excessive penalties for large configs
+        penalty_per_redundant = 2.0 / max(total_rules, 10)  # Max 2 points per rule, normalized
+        penalty_per_shadowed = 3.0 / max(total_rules, 10)  # Max 3 points per rule, normalized
+        penalty_per_unused = 1.0 / max(total_rules, 10)  # Max 1 point per object, normalized
+        
+        redundant_count = hygiene_metrics.get("redundant_rules", 0)
+        shadowed_count = hygiene_metrics.get("shadowed_rules", 0)
+        unused_count = hygiene_metrics.get("unused_objects", 0)
+        
+        # Calculate penalties
+        redundant_penalty = redundant_count * penalty_per_redundant * min(total_rules, 10)
+        shadowed_penalty = shadowed_count * penalty_per_shadowed * min(total_rules, 10)
+        unused_penalty = unused_count * penalty_per_unused * min(total_rules, 10)
+        
+        total_penalty = redundant_penalty + shadowed_penalty + unused_penalty
+        
+        # Calculate final score (clamp to 0-100)
+        score = max(0.0, min(100.0, base_score - total_penalty))
+        
+        return round(score, 1)

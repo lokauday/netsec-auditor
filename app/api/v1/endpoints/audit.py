@@ -61,6 +61,7 @@ async def audit_config_file(
             f"Audit completed: config_id={config_file_id}, "
             f"vendor={audit_result.get('vendor')}, "
             f"risk_score={audit_result['risk_score']}, "
+            f"hygiene_score={audit_result.get('policy_hygiene_score', 'N/A')}, "
             f"findings_count={len(audit_result.get('findings', []))}, "
             f"ai_enabled={audit_result.get('ai_enabled', False)}, "
             f"ai_findings_count={ai_findings_count}"
