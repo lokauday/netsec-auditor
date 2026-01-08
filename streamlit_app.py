@@ -39,22 +39,42 @@ def get_api_base_url() -> str:
     """
     Normalize API base URL from environment variable.
     
-    Handles both bare hostnames and full URLs:
+    Handles various input formats:
     - Empty env var -> http://localhost:8000 (local dev)
-    - Full URL (http:// or https://) -> use as-is
+    - "https:https://..." -> fixes double scheme to "https://..."
+    - "https://..." or "http://..." -> use as-is (after fixing double scheme)
     - Bare hostname -> prepend https://
+    
+    Always returns a clean URL with no trailing slash, no double scheme.
     """
-    raw = os.getenv("API_BASE_URL", "").strip().rstrip("/")
+    raw = os.getenv("API_BASE_URL", "").strip()
     
     # If the env var is empty, default to local dev
     if not raw:
         return "http://localhost:8000"
     
-    # If it already looks like a full URL, trust it
+    # Fix double scheme issue: "https:https://" -> "https://"
+    # Also handle "http:http://" and similar
+    if "://" in raw:
+        # Find the first occurrence of ://
+        scheme_end = raw.find("://")
+        if scheme_end > 0:
+            # Check if there's a colon before the scheme (double scheme)
+            before_scheme = raw[:scheme_end]
+            if ":" in before_scheme:
+                # Extract the actual scheme (last part before :)
+                actual_scheme = before_scheme.split(":")[-1]
+                # Reconstruct URL with correct scheme
+                raw = f"{actual_scheme}://{raw[scheme_end + 3:]}"
+    
+    # Remove trailing slash
+    raw = raw.rstrip("/")
+    
+    # If it already has a scheme (http:// or https://), return as-is
     if raw.startswith("http://") or raw.startswith("https://"):
         return raw
     
-    # Otherwise treat it as a bare host and make it HTTPS by default
+    # Otherwise treat it as a bare hostname and make it HTTPS by default
     return f"https://{raw}"
 
 

@@ -66,10 +66,16 @@ class Settings(BaseSettings):
         2. PG* vars (Railway Postgres plugin raw env vars)
         3. Local docker-compose Postgres (POSTGRES_*)
         4. SQLite (local development without Docker)
+        
+        Normalizes postgres:// to postgresql+psycopg2:// for SQLAlchemy compatibility.
         """
         # Priority 1: DATABASE_URL (Railway or explicit connection string)
         if self.DATABASE_URL:
-            return self.DATABASE_URL
+            # Normalize postgres:// to postgresql+psycopg2:// (Railway uses postgres://)
+            database_url = self.DATABASE_URL
+            if database_url.startswith("postgres://"):
+                database_url = database_url.replace("postgres://", "postgresql+psycopg2://", 1)
+            return database_url
         
         # Priority 2: PG* vars (Railway Postgres plugin)
         if self.PGUSER and self.PGHOST and self.PGDATABASE:

@@ -7,6 +7,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -47,7 +48,33 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up NetSec Auditor API...")
     
-    # Ensure database tables are created
+    # Run Alembic migrations if DATABASE_URL is set (Railway/cloud deployment)
+    # This ensures migrations run even if start.sh didn't execute them
+    import os
+    if os.getenv("DATABASE_URL"):
+        try:
+            from alembic.config import Config
+            from alembic import command
+            import traceback
+            
+            logger.info("DATABASE_URL detected, running Alembic migrations...")
+            alembic_cfg = Config("alembic.ini")
+            # Run migrations with safe retry - won't crash if already migrated
+            command.upgrade(alembic_cfg, "head")
+            logger.info("Alembic migrations completed successfully")
+        except Exception as e:
+            # Log error but don't fail startup - migrations may have already run
+            # or database may not be ready yet (Railway sometimes has timing issues)
+            error_msg = str(e)
+            trace_id = str(uuid.uuid4())
+            logger.warning(
+                f"[{trace_id}] Alembic migration check failed: {error_msg}. "
+                "This is OK if migrations already ran or database is not ready yet. "
+                "Check logs if you see database errors."
+            )
+            logger.debug(f"[{trace_id}] Migration error details:", exc_info=True)
+    
+    # Ensure database tables are created (fallback for local dev without Alembic)
     try:
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified successfully")
@@ -65,13 +92,22 @@ async def lifespan(app: FastAPI):
         db = SessionLocal()
         try:
             # Simple connectivity test
-            db.execute("SELECT 1")
+            db.execute(text("SELECT 1"))
+            db.commit()
             logger.info("Database connectivity verified")
         finally:
             db.close()
     except Exception as e:
-        logger.error(f"Database connectivity test failed: {e}", exc_info=True)
-        logger.warning("Database may not be accessible. Check DATABASE_URL configuration.")
+        trace_id = str(uuid.uuid4())
+        logger.error(
+            f"[{trace_id}] Database connectivity test failed: {e}", 
+            exc_info=True
+        )
+        logger.warning(
+            f"[{trace_id}] Database may not be accessible. "
+            "Check DATABASE_URL configuration and ensure the database is running. "
+            f"Trace ID: {trace_id}"
+        )
     
     # Seed built-in rule packs
     try:

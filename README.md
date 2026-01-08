@@ -90,25 +90,46 @@ NetSec Auditor can be deployed to Railway using the provided `railway.json` conf
    - A PostgreSQL plugin is created and wired as `DATABASE_URL`
    - Service `netsec-auditor-api` is deployed from `Dockerfile`
 
-3. **Environment variables:**
-   - `DATABASE_URL`: Automatically set by Railway from PostgreSQL plugin
-   - `API_KEY`: Set to your secure API key in Railway dashboard (required - no default)
+3. **Environment variables for API service (`netsec-auditor-api`):**
+   - `DATABASE_URL`: Automatically set by Railway from PostgreSQL plugin (normalized from `postgres://` to `postgresql+psycopg2://` automatically)
+   - `API_KEY`: Set to your secure API key in Railway dashboard (optional but recommended)
    - `OPENAI_API_KEY`: (Optional) Your OpenAI API key for AI-enhanced audit mode
+   - `ALLOWED_ORIGINS`: (Optional) Comma-separated list of allowed CORS origins, e.g., `https://netsec-auditor-ui.up.railway.app`
+   - `DEBUG`: Set to `false` in production
+   - `LOG_LEVEL`: `INFO` or `WARNING` for production
 
-### Railway Deployment – Database Env
+**Note:** Database migrations run automatically on Railway startup via `start.sh` and also as a backup in the API startup code. The `DATABASE_URL` is automatically normalized (converts `postgres://` to `postgresql+psycopg2://` for SQLAlchemy compatibility).
+
+4. **Deploy UI service (`netsec-auditor-ui`):**
+   - In the same Railway project, add a new service
+   - Set Dockerfile Path to `Dockerfile.streamlit`
+   - **Environment variables for UI service:**
+     - `API_BASE_URL`: Set to your API service URL (e.g., `https://netsec-auditor-api-production.up.railway.app`)
+       - Can be set as bare hostname (e.g., `netsec-auditor-api-production.up.railway.app`) - will auto-prefix `https://`
+       - Can be set as full URL (e.g., `https://netsec-auditor-api-production.up.railway.app`)
+       - Automatically handles double-scheme issues (e.g., `https:https://...` is normalized)
+       - **Important:** Always use the full HTTPS URL of your API service
+
+### Railway Deployment – Database Configuration
 
 The API automatically detects the database connection string in this order:
 
-1. `DATABASE_URL` (Railway Postgres connection string)
+1. `DATABASE_URL` (Railway Postgres connection string) - **automatically normalized** (`postgres://` → `postgresql+psycopg2://`)
 2. `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (Railway plugin vars)
 3. Local docker-compose defaults (`POSTGRES_*` / `db:5432`)
 
 On Railway, make sure the Postgres plugin is attached and `DATABASE_URL` is available to the `netsec-auditor-api` service.
 
-4. **Access your deployed API:**
-   - Railway provides a public URL (e.g., `https://netsec-auditor-api.up.railway.app`)
-   - API Docs: `https://your-railway-url/docs`
-   - Health Check: `https://your-railway-url/health`
+**Database Migrations:**
+- Migrations run automatically on Railway deploy via `start.sh` script
+- Also run as a backup in API startup code (won't crash if already migrated)
+- If migrations fail, check logs for trace IDs and error messages
+
+5. **Access your deployed services:**
+   - API: Railway provides a public URL (e.g., `https://netsec-auditor-api.up.railway.app`)
+   - API Docs: `https://your-api-url/docs`
+   - Health Check: `https://your-api-url/health`
+   - UI: Railway provides a public URL (e.g., `https://netsec-auditor-ui.up.railway.app`)
 
 The `railway.json` config handles database connection automatically. The API binds to `0.0.0.0` and respects Railway's `$PORT` environment variable.
 
