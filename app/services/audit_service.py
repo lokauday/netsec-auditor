@@ -85,6 +85,10 @@ class AuditService:
         ai_enabled = ai_enabled and settings.is_openai_available()
         ai_summary_enhancement = ""
         
+        # If AI is enabled, enhance findings with AI explanations
+        if ai_enabled and findings:
+            findings = self._enhance_findings_with_ai(findings, config_file)
+        
         # If OpenAI API key is configured and ai_enabled=True, enhance with AI analysis
         if ai_enabled:
             try:
@@ -2015,3 +2019,78 @@ Focus on:
         score = max(0.0, min(100.0, base_score - total_penalty))
         
         return round(score, 1)
+    
+    def _enhance_findings_with_ai(
+        self,
+        findings: List[SecurityFinding],
+        config_file: ConfigFile,
+    ) -> List[SecurityFinding]:
+        """
+        Enhance findings with AI explanations.
+        
+        This method adds AI-generated explanations to each finding without
+        changing the core finding logic (AI is for explanation only).
+        
+        Args:
+            findings: List of rule-based findings
+            config_file: Configuration file model
+            
+        Returns:
+            List of findings with AI explanations added
+        """
+        if not settings.is_openai_available():
+            return findings
+        
+        try:
+            from app.services.ai_service import AIService
+            
+            # Read config context for AI (limited to avoid token limits)
+            config_context = None
+            try:
+                from pathlib import Path
+                config_path = Path(config_file.file_path)
+                if config_path.exists():
+                    # Read first 2000 chars for context
+                    config_context = config_path.read_text(encoding='utf-8', errors='ignore')[:2000]
+            except Exception as e:
+                logger.debug(f"Could not read config for AI context: {e}")
+            
+            ai_service = AIService()
+            if not ai_service.is_available():
+                return findings
+            
+            # Enhance each finding with AI explanations
+            enhanced_findings = []
+            for finding in findings:
+                try:
+                    ai_data = ai_service.explain_finding(
+                        finding_code=finding.code,
+                        finding_description=finding.description,
+                        finding_severity=finding.severity,
+                        affected_objects=finding.affected_objects,
+                        config_context=config_context,
+                    )
+                    
+                    # Create enhanced finding with AI fields
+                    enhanced_finding = SecurityFinding(
+                        severity=finding.severity,
+                        code=finding.code,
+                        description=finding.description,
+                        affected_objects=finding.affected_objects,
+                        recommendation=finding.recommendation,
+                        ai_explanation=ai_data.get("ai_explanation"),
+                        business_impact=ai_data.get("business_impact"),
+                        attack_path=ai_data.get("attack_path"),
+                        remediation_steps=ai_data.get("remediation_steps"),
+                    )
+                    enhanced_findings.append(enhanced_finding)
+                except Exception as e:
+                    logger.warning(f"Failed to enhance finding {finding.code} with AI: {e}")
+                    # If AI enhancement fails, keep the original finding
+                    enhanced_findings.append(finding)
+            
+            return enhanced_findings
+        except Exception as e:
+            logger.error(f"Error enhancing findings with AI: {e}", exc_info=True)
+            # If AI enhancement fails entirely, return original findings
+            return findings

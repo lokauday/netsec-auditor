@@ -768,6 +768,38 @@ with tab2:
             )
             
             st.caption(f"Showing {len(filtered_findings)} of {len(findings)} findings")
+            
+            # AI Explanations (if available)
+            st.markdown("---")
+            st.subheader("🤖 AI Explanations")
+            st.markdown("Detailed AI-generated explanations for findings (when AI is enabled)")
+            
+            findings_with_ai = [f for f in filtered_findings if f.get("ai_explanation") or f.get("business_impact") or f.get("attack_path") or f.get("remediation_steps")]
+            
+            if findings_with_ai:
+                for idx, finding in enumerate(findings_with_ai[:20]):  # Limit to first 20 to avoid UI overload
+                    with st.expander(f"🔍 {finding.get('code', 'N/A')} - {finding.get('description', 'N/A')[:60]}..."):
+                        col_ai1, col_ai2 = st.columns(2)
+                        
+                        with col_ai1:
+                            if finding.get("ai_explanation"):
+                                st.markdown("**📝 Explanation**")
+                                st.info(finding.get("ai_explanation"))
+                            
+                            if finding.get("business_impact"):
+                                st.markdown("**💼 Business Impact**")
+                                st.warning(finding.get("business_impact"))
+                        
+                        with col_ai2:
+                            if finding.get("attack_path"):
+                                st.markdown("**🎯 Attack Path**")
+                                st.error(finding.get("attack_path"))
+                            
+                            if finding.get("remediation_steps"):
+                                st.markdown("**🔧 Remediation Steps**")
+                                st.success(finding.get("remediation_steps"))
+            else:
+                st.info("No AI explanations available. Enable AI analysis when running audits to see detailed explanations.")
         else:
             st.success("✅ No security findings detected!")
     else:
@@ -1737,6 +1769,59 @@ with tab_rules:
         # Create new rule
         st.subheader("➕ Create New Rule")
         
+        # AI Rule Suggestion
+        st.markdown("**🤖 Generate Rule with AI**")
+        ai_rule_description = st.text_input(
+            "Describe the rule you want to create:",
+            placeholder="e.g., Detect outbound DNS tunnels",
+            key="ai_rule_description"
+        )
+        ai_vendor_hint = st.selectbox(
+            "Vendor (optional):",
+            options=["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"],
+            key="ai_vendor_hint"
+        )
+        
+        if st.button("✨ Generate with AI", key="generate_ai_rule"):
+            if not ai_rule_description or not ai_rule_description.strip():
+                st.error("⚠️ Please provide a rule description")
+            else:
+                try:
+                    # Helper function for AI rule suggestion
+                    def suggest_rule_with_ai(description: str, vendor_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                        """Get AI rule suggestion."""
+                        url = f"{API_BASE_URL}/api/v1/rules/ai-suggest"
+                        headers = get_headers()
+                        try:
+                            payload = {"description": description}
+                            if vendor_hint:
+                                payload["vendor_hint"] = vendor_hint
+                            response = requests.post(url, headers=headers, json=payload, timeout=30)
+                            response.raise_for_status()
+                            return response.json()
+                        except requests.exceptions.RequestException as e:
+                            if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 503:
+                                st.error("❌ AI service not available. OpenAI API key not configured.")
+                            else:
+                                handle_api_error(e)
+                            return None
+                    
+                    with st.spinner("🤖 Generating rule suggestion with AI..."):
+                        suggestion = suggest_rule_with_ai(ai_rule_description.strip(), ai_vendor_hint if ai_vendor_hint else None)
+                        if suggestion:
+                            st.session_state["ai_rule_suggestion"] = suggestion
+                            st.success("✅ Rule suggestion generated! Fill the form below with the suggested values.")
+                except Exception as e:
+                    st.error(f"❌ Error generating rule suggestion: {str(e)}")
+        
+        # Pre-fill form with AI suggestion if available
+        ai_suggestion = st.session_state.get("ai_rule_suggestion")
+        if ai_suggestion:
+            st.info("💡 AI suggestion loaded. Review and adjust the fields below.")
+            if st.button("Clear AI Suggestion", key="clear_ai_suggestion"):
+                st.session_state["ai_rule_suggestion"] = None
+                st.rerun()
+        
         # Rule templates
         template_options = {
         "Custom": None,
@@ -1780,28 +1865,43 @@ with tab_rules:
         with st.form("create_rule_form"):
             template = template_options[selected_template] if selected_template != "Custom" else None
             
-            new_rule_name = st.text_input("Rule Name", value=template.get("name", "") if template else "")
-            new_rule_description = st.text_area("Description", value=template.get("description", "") if template else "")
+            # Pre-fill with AI suggestion if available
+            default_name = ai_suggestion.get("name", "") if ai_suggestion else (template.get("name", "") if template else "")
+            default_description = ai_suggestion.get("description", "") if ai_suggestion else (template.get("description", "") if template else "")
+            default_vendor = ai_suggestion.get("vendor") if ai_suggestion else (template.get("vendor", "") if template else "")
+            default_category = ai_suggestion.get("category", "general") if ai_suggestion else (template.get("category", "general") if template else "general")
+            default_severity = ai_suggestion.get("severity", "medium") if ai_suggestion else (template.get("severity", "medium") if template else "medium")
+            default_match_criteria = ai_suggestion.get("match_criteria", {}) if ai_suggestion else (template.get("match_criteria", {}) if template else {})
+            
+            new_rule_name = st.text_input("Rule Name", value=default_name)
+            new_rule_description = st.text_area("Description", value=default_description)
+            vendor_options = ["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"]
+            vendor_index = vendor_options.index(default_vendor) if default_vendor in vendor_options else 0
             new_rule_vendor = st.selectbox(
                 "Vendor",
-                options=["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"],
-                index=(["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"].index(template.get("vendor", "")) if template and template.get("vendor") in ["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"] else 0)
+                options=vendor_options,
+                index=vendor_index
             )
+            
+            category_options = ["general", "acl", "nat", "vpn", "routing", "interface", "crypto", "authentication"]
+            category_index = category_options.index(default_category) if default_category in category_options else 0
             new_rule_category = st.selectbox(
                 "Category",
-                options=["general", "acl", "nat", "vpn", "routing", "interface", "crypto", "authentication"],
-                index=["general", "acl", "nat", "vpn", "routing", "interface", "crypto", "authentication"].index(template.get("category", "general")) if template and template.get("category") in ["general", "acl", "nat", "vpn", "routing", "interface", "crypto", "authentication"] else 0
+                options=category_options,
+                index=category_index
             )
+            
+            severity_options = ["critical", "high", "medium", "low"]
+            severity_index = severity_options.index(default_severity) if default_severity in severity_options else 2
             new_rule_severity = st.selectbox(
                 "Severity",
-                options=["critical", "high", "medium", "low"],
-                index=["critical", "high", "medium", "low"].index(template.get("severity", "medium")) if template and template.get("severity") in ["critical", "high", "medium", "low"] else 2
+                options=severity_options,
+                index=severity_index
             )
             new_rule_enabled = st.checkbox("Enabled", value=True)
             
             st.markdown("**Match Criteria (JSON):**")
             import json
-            default_match_criteria = template.get("match_criteria", {}) if template else {}
             new_rule_match_criteria = st.text_area(
                 "Match Criteria",
                 value=json.dumps(default_match_criteria, indent=2),
@@ -1831,6 +1931,9 @@ with tab_rules:
                             result = create_rule(rule_data)
                             if result:
                                 st.success("✅ Rule created successfully!")
+                                # Clear AI suggestion after successful creation
+                                if "ai_rule_suggestion" in st.session_state:
+                                    del st.session_state["ai_rule_suggestion"]
                                 st.rerun()
                     except json.JSONDecodeError:
                         st.error("❌ Invalid JSON in match criteria")
