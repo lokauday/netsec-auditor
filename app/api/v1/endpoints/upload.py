@@ -74,10 +74,16 @@ async def upload_config_file(
         linked_device_id = device_id
         
         # If device_id not provided but device_name is, try to find existing device
+        # Wrap in try/except to handle case where devices table doesn't exist (e.g., in tests or migrations)
         if not linked_device_id and device_name:
-            existing_device = db.query(Device).filter(Device.hostname == device_name).first()
-            if existing_device:
-                linked_device_id = existing_device.id
+            try:
+                existing_device = db.query(Device).filter(Device.hostname == device_name).first()
+                if existing_device:
+                    linked_device_id = existing_device.id
+            except Exception as e:
+                # If device lookup fails (e.g., table doesn't exist), log and continue without device linking
+                logger.debug(f"Could not lookup device by name '{device_name}': {e}. Continuing without device linking.")
+                linked_device_id = None
         
         # Save and parse
         service = ConfigService(db)

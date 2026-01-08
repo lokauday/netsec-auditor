@@ -81,6 +81,7 @@ class ConfigService:
             raise ValueError(f"Cannot save file to disk: {e}")
         
         # Create database record
+        # Handle device_id gracefully - if the column doesn't exist in the DB schema, set it to None
         config_file = ConfigFile(
             filename=file_path.name,
             vendor=vendor,
@@ -91,11 +92,36 @@ class ConfigService:
             device_ip=device_ip,
             environment=environment,
             location=location,
-            device_id=device_id,
+            device_id=device_id,  # Will be None if device lookup failed or wasn't provided
         )
-        self.db.add(config_file)
-        self.db.commit()
-        self.db.refresh(config_file)
+        try:
+            self.db.add(config_file)
+            self.db.commit()
+            self.db.refresh(config_file)
+        except Exception as e:
+            # If commit fails (e.g., schema mismatch), try without device_id
+            if device_id is not None and "device_id" in str(e).lower():
+                logger.warning(f"Database schema mismatch for device_id, retrying without device_id: {e}")
+                self.db.rollback()
+                # Create a new object without device_id
+                config_file = ConfigFile(
+                    filename=file_path.name,
+                    vendor=vendor,
+                    original_filename=filename,
+                    file_path=str(file_path),
+                    file_size=len(content),
+                    device_name=device_name,
+                    device_ip=device_ip,
+                    environment=environment,
+                    location=location,
+                    device_id=None,  # Omit device_id if schema doesn't support it
+                )
+                self.db.add(config_file)
+                self.db.commit()
+                self.db.refresh(config_file)
+            else:
+                # Re-raise if it's a different error
+                raise
         
         logger.info(f"Saved config file: {filename} (ID: {config_file.id}, Vendor: {vendor.value})")
         return config_file

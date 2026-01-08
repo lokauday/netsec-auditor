@@ -24,6 +24,11 @@ from app.models import (
     Route,
     AuditRecord,
     APIKey,
+    Device,  # Ensure Device model is imported so table is created
+    ActivityLog,  # Ensure ActivityLog model is imported so table is created
+    Rule,  # Ensure Rule model is imported so table is created
+    RulePack,  # Ensure RulePack model is imported so table is created
+    DeviceRulePack,  # Ensure DeviceRulePack model is imported so table is created
 )
 
 # Use file-based SQLite for testing (more reliable than in-memory)
