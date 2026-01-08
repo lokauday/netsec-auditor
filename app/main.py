@@ -213,7 +213,41 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """
+    Health check endpoint for Railway/load balancer.
+    
+    Returns 200 immediately without DB checks to ensure service is marked healthy.
+    Use /health/db for database readiness checks.
+    """
     return {"status": "ok"}
 
+
+@app.get("/health/db")
+async def health_check_db():
+    """
+    Database health check endpoint.
+    
+    Returns 200 if database is accessible, 503 if not.
+    Use this for database readiness checks, not for general health.
+    """
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            db.commit()
+            return {"status": "ok", "database": "connected"}
+        finally:
+            db.close()
+    except Exception as e:
+        trace_id = str(uuid.uuid4())
+        logger.warning(f"[{trace_id}] Database health check failed: {e}")
+        from fastapi import status
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "unhealthy",
+                "database": "disconnected",
+                "trace_id": trace_id,
+            }
+        )
 
