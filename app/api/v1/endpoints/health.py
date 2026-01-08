@@ -5,8 +5,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from app.core.database import get_db, Session
+from app.core.database import get_db
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
