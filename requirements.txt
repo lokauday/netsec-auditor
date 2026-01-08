@@ -8,6 +8,8 @@ sqlalchemy==2.0.36
 # psycopg2-binary only needed for PostgreSQL (Docker/Linux)
 # On Windows, SQLite is used by default - no PostgreSQL client needed
 psycopg2-binary==2.9.9; sys_platform != "win32"
+# Database migrations
+alembic==1.13.2
 
 # Pydantic v2 with Python 3.13 compatible versions (pre-built wheels)
 pydantic==2.9.2
