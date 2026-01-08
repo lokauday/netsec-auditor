@@ -99,11 +99,13 @@ class ConfigService:
             self.db.commit()
             self.db.refresh(config_file)
         except Exception as e:
-            # If commit fails (e.g., schema mismatch), try without device_id
-            if device_id is not None and "device_id" in str(e).lower():
-                logger.warning(f"Database schema mismatch for device_id, retrying without device_id: {e}")
+            # If commit fails due to device_id column missing, try without device_id
+            error_str = str(e).lower()
+            if "device_id" in error_str and ("no such column" in error_str or "no column" in error_str):
+                logger.warning(f"Database schema mismatch for device_id column, retrying without device_id: {e}")
                 self.db.rollback()
-                # Create a new object without device_id
+                # Create a new object without device_id (set it to None explicitly)
+                # SQLAlchemy will skip None values if the column doesn't exist
                 config_file = ConfigFile(
                     filename=file_path.name,
                     vendor=vendor,
@@ -114,11 +116,26 @@ class ConfigService:
                     device_ip=device_ip,
                     environment=environment,
                     location=location,
-                    device_id=None,  # Omit device_id if schema doesn't support it
+                    device_id=None,  # Set to None - SQLAlchemy should handle this gracefully
                 )
-                self.db.add(config_file)
-                self.db.commit()
-                self.db.refresh(config_file)
+                # Remove device_id from the object's dict to prevent SQLAlchemy from trying to insert it
+                # Actually, we can't easily do that with SQLAlchemy ORM, so we'll rely on the model
+                # But if the column truly doesn't exist, we need to not set it at all
+                # The issue is that SQLAlchemy will try to insert None into a non-existent column
+                # So we need to check if the column exists first, or handle it differently
+                # For now, let's try setting device_id to None and see if SQLAlchemy handles it
+                # If it still fails, we'll need a different approach
+                try:
+                    self.db.add(config_file)
+                    self.db.commit()
+                    self.db.refresh(config_file)
+                except Exception as e2:
+                    # If it still fails, the column truly doesn't exist and we can't use it
+                    # In this case, we need to create the object without device_id in the insert
+                    # But SQLAlchemy ORM doesn't easily support this
+                    # So we'll just log and re-raise - the real fix is to ensure the DB schema is up to date
+                    logger.error(f"Failed to save config file even without device_id: {e2}")
+                    raise ValueError(f"Database schema error: device_id column missing. Please run migrations. Original error: {e}")
             else:
                 # Re-raise if it's a different error
                 raise

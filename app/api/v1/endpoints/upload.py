@@ -104,22 +104,26 @@ async def upload_config_file(
             f"device_name={device_name}, environment={environment}"
         )
         
-        # Log activity
-        log_activity(
-            db=db,
-            client=client,
-            action=ActivityAction.CONFIG_UPLOAD,
-            resource_type=ResourceType.CONFIG_FILE,
-            resource_id=config_file.id,
-            details={
-                "filename": file.filename,
-                "vendor": config_file.vendor.value,
-                "file_size": config_file.file_size,
-                "device_name": device_name,
-                "environment": environment,
-            },
-            request=request,
-        )
+        # Log activity (non-critical - if it fails, don't fail the upload)
+        try:
+            log_activity(
+                db=db,
+                client=client,
+                action=ActivityAction.CONFIG_UPLOAD,
+                resource_type=ResourceType.CONFIG_FILE,
+                resource_id=config_file.id,
+                details={
+                    "filename": file.filename,
+                    "vendor": config_file.vendor.value,
+                    "file_size": config_file.file_size,
+                    "device_name": device_name,
+                    "environment": environment,
+                },
+                request=request,
+            )
+        except Exception as e:
+            # Activity logging is non-critical - log error but don't fail the upload
+            logger.warning(f"Failed to log activity for upload (config_id={config_file.id}): {e}")
         
         return ConfigFileResponse(
             id=config_file.id,
