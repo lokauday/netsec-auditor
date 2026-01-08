@@ -67,6 +67,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
+    redirect_slashes=False,  # Disable automatic trailing slash redirects to prevent POST->GET redirect issues in production
 )
 
 # CORS middleware - support ALLOWED_ORIGINS or CORS_ORIGINS env var for cloud deployment
