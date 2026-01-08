@@ -39,7 +39,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Set target_metadata for autogenerate support
-target_metadata = Base.metadata
+target_metadata = Base.metadata if Base is not None else None
 
 # Get DATABASE_URL from environment and convert if needed
 def get_database_url():
