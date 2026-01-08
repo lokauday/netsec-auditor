@@ -64,8 +64,22 @@ class AuditService:
         routes = self.db.query(Route).filter(Route.config_file_id == config_file_id).all()
         interfaces = self.db.query(Interface).filter(Interface.config_file_id == config_file_id).all()
         
+        # Get active rule packs for device (if device is linked)
+        active_rule_pack_ids = None
+        if config_file.device_id:
+            from app.models.device import Device
+            from app.models.rule_pack import DeviceRulePack
+            device = self.db.query(Device).filter(Device.id == config_file.device_id).first()
+            if device:
+                active_packs = self.db.query(DeviceRulePack).filter(
+                    DeviceRulePack.device_id == config_file.device_id,
+                    DeviceRulePack.enabled == True
+                ).all()
+                active_rule_pack_ids = [dp.rule_pack_id for dp in active_packs]
+        
         # Run rule-based security checks (includes both built-in and custom rules)
-        findings = self._run_rule_based_checks(config_file, acls, nat_rules, routes, interfaces)
+        # If device has active packs, only evaluate rules from those packs
+        findings = self._run_rule_based_checks(config_file, acls, nat_rules, routes, interfaces, active_rule_pack_ids)
         
         # AI analysis flag (use parameter if provided)
         ai_enabled = ai_enabled and settings.is_openai_available()
@@ -208,6 +222,7 @@ class AuditService:
         nat_rules: List[NATRule],
         routes: List[Route],
         interfaces: List[Interface],
+        active_rule_pack_ids: Optional[List[int]] = None,
     ) -> List[SecurityFinding]:
         """Run rule-based security checks and return structured findings."""
         findings = []
@@ -1656,15 +1671,21 @@ Focus on:
         routes: List[Route],
         interfaces: List[Interface],
         raw_config_text: str,
+        active_rule_pack_ids: Optional[List[int]] = None,
     ) -> List[SecurityFinding]:
         """
         Evaluate custom rules from database against the configuration.
+        
+        If active_rule_pack_ids is provided, only evaluates rules from those packs.
+        Otherwise, evaluates all enabled rules.
         
         Returns list of SecurityFinding objects for matching rules.
         """
         findings = []
         
         try:
+            from app.models.rule_pack import RulePack
+            
             # Load enabled rules that match this vendor (or are vendor-agnostic)
             vendor_str = config_file.vendor.value if config_file.vendor else None
             query = self.db.query(Rule).filter(Rule.enabled == True)
@@ -1677,18 +1698,52 @@ Focus on:
             else:
                 query = query.filter(Rule.vendor.is_(None))
             
-            custom_rules = query.all()
+            # Filter by active rule packs if specified
+            if active_rule_pack_ids:
+                # Only get rules that belong to active packs
+                query = query.join(RulePack.rules).filter(RulePack.id.in_(active_rule_pack_ids))
+                # Also get rules that are not in any pack (standalone rules)
+                # This allows custom rules to still work even if packs are assigned
+                standalone_rules = self.db.query(Rule).filter(
+                    Rule.enabled == True,
+                    ~Rule.rule_packs.any()  # Rules not in any pack
+                )
+                if vendor_str:
+                    standalone_rules = standalone_rules.filter(
+                        (Rule.vendor == vendor_str) | (Rule.vendor.is_(None))
+                    )
+                else:
+                    standalone_rules = standalone_rules.filter(Rule.vendor.is_(None))
+                
+                custom_rules = list(query.all()) + list(standalone_rules.all())
+            else:
+                # No pack filtering - evaluate all enabled rules
+                custom_rules = query.all()
+            
+            # Get pack info for rules (for finding attribution)
+            rule_pack_map = {}
+            if active_rule_pack_ids:
+                for pack_id in active_rule_pack_ids:
+                    pack = self.db.query(RulePack).filter(RulePack.id == pack_id).first()
+                    if pack:
+                        for rule in pack.rules:
+                            if rule.id not in rule_pack_map:
+                                rule_pack_map[rule.id] = pack.name
             
             for rule in custom_rules:
                 try:
                     if self._rule_matches(rule, config_file, acls, nat_rules, routes, interfaces, raw_config_text):
+                        # Get pack name if rule belongs to a pack
+                        pack_name = rule_pack_map.get(rule.id)
+                        pack_info = f" (Pack: {pack_name})" if pack_name else ""
+                        
                         findings.append(
                             SecurityFinding(
                                 severity=rule.severity.value,
                                 code=f"CUSTOM_RULE_{rule.id}",
-                                description=rule.description or f"Custom rule violation: {rule.name}",
+                                description=rule.description or f"Custom rule violation: {rule.name}{pack_info}",
                                 recommendation=f"Review and fix configuration to comply with rule: {rule.name}",
-                                affected_objects=[f"Rule: {rule.name}"],
+                                affected_objects=[f"Rule: {rule.name}" + (f" | Pack: {pack_name}" if pack_name else "")],
                             )
                         )
                 except Exception as e:

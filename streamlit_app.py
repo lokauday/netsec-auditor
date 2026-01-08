@@ -1368,6 +1368,107 @@ with tab_devices:
                     st.metric("Config Files", device_detail.get("config_count", 0))
                 
                 st.markdown("---")
+                st.markdown("### Active Rule Packs")
+                
+                # Helper functions for rule packs
+                def get_device_rule_packs(device_id: int) -> List[Dict[str, Any]]:
+                    """Get rule packs for a device."""
+                    url = f"{API_BASE_URL}/api/v1/rule-packs/device/{device_id}"
+                    headers = get_headers()
+                    try:
+                        response = requests.get(url, headers=headers, timeout=10)
+                        response.raise_for_status()
+                        return response.json()
+                    except requests.exceptions.RequestException as e:
+                        handle_api_error(e)
+                        return []
+                
+                def attach_rule_pack_to_device(device_id: int, pack_id: int) -> bool:
+                    """Attach a rule pack to a device."""
+                    url = f"{API_BASE_URL}/api/v1/rule-packs/device/{device_id}/pack/{pack_id}"
+                    headers = get_headers()
+                    try:
+                        response = requests.post(url, headers=headers, timeout=10)
+                        response.raise_for_status()
+                        return True
+                    except requests.exceptions.RequestException as e:
+                        handle_api_error(e)
+                        return False
+                
+                def list_all_rule_packs() -> Dict[str, Any]:
+                    """List all rule packs."""
+                    url = f"{API_BASE_URL}/api/v1/rule-packs/"
+                    headers = get_headers()
+                    try:
+                        response = requests.get(url, headers=headers, timeout=10)
+                        response.raise_for_status()
+                        return response.json()
+                    except requests.exceptions.RequestException as e:
+                        handle_api_error(e)
+                        return {"items": [], "total": 0}
+                
+                def update_device_rule_pack(device_id: int, pack_id: int, enabled: bool) -> bool:
+                    """Update device-rule pack association."""
+                    url = f"{API_BASE_URL}/api/v1/rule-packs/device/{device_id}/pack/{pack_id}"
+                    headers = get_headers()
+                    try:
+                        response = requests.put(url, headers=headers, json={"enabled": enabled}, timeout=10)
+                        response.raise_for_status()
+                        return True
+                    except requests.exceptions.RequestException as e:
+                        handle_api_error(e)
+                        return False
+                
+                device_packs = get_device_rule_packs(selected_device_id)
+                all_packs = list_all_rule_packs()
+                
+                if device_packs:
+                    st.markdown("**Active Packs:**")
+                    for dp in device_packs:
+                        pack_status = "✅ Enabled" if dp.get("enabled") else "❌ Disabled"
+                        col_pack, col_toggle, col_remove = st.columns([3, 1, 1])
+                        with col_pack:
+                            st.write(f"- **{dp.get('rule_pack_name', 'N/A')}** ({pack_status})")
+                        with col_toggle:
+                            new_status = st.checkbox("Enable", value=dp.get("enabled"), key=f"pack_toggle_{dp.get('id')}")
+                            if new_status != dp.get("enabled"):
+                                if update_device_rule_pack(selected_device_id, dp.get("rule_pack_id"), new_status):
+                                    st.success("Updated!")
+                                    st.rerun()
+                        with col_remove:
+                            if st.button("Remove", key=f"pack_remove_{dp.get('id')}"):
+                                # Detach pack
+                                url = f"{API_BASE_URL}/api/v1/rule-packs/device/{selected_device_id}/pack/{dp.get('rule_pack_id')}"
+                                headers = get_headers()
+                                try:
+                                    response = requests.delete(url, headers=headers, timeout=10)
+                                    response.raise_for_status()
+                                    st.success("Pack removed!")
+                                    st.rerun()
+                                except requests.exceptions.RequestException as e:
+                                    handle_api_error(e)
+                else:
+                    st.info("No rule packs attached to this device.")
+                
+                # Attach new pack
+                st.markdown("**Attach Rule Pack:**")
+                available_packs = [p for p in all_packs.get("items", []) if not any(dp.get("rule_pack_id") == p.get("id") for dp in device_packs)]
+                if available_packs:
+                    pack_options = {f"{p.get('name')} ({p.get('rule_count', 0)} rules)": p.get("id") for p in available_packs}
+                    selected_pack_label = st.selectbox(
+                        "Select pack to attach:",
+                        options=[""] + list(pack_options.keys()),
+                        key=f"attach_pack_{selected_device_id}"
+                    )
+                    if selected_pack_label and selected_pack_label in pack_options:
+                        if st.button("Attach Pack", key=f"attach_btn_{selected_device_id}"):
+                            if attach_rule_pack_to_device(selected_device_id, pack_options[selected_pack_label]):
+                                st.success("Pack attached!")
+                                st.rerun()
+                else:
+                    st.info("All available packs are already attached.")
+                
+                st.markdown("---")
                 st.markdown("### Related Configurations")
                 config_count = device_detail.get("config_count", 0)
                 if config_count > 0:
@@ -1435,9 +1536,13 @@ with tab_devices:
 # ============= Rules Tab =============
 with tab_rules:
     st.header("🔧 Security Rules Management")
-    st.markdown("Define and manage custom security rules for configuration auditing.")
+    st.markdown("Define and manage custom security rules and rule packs for configuration auditing.")
     
-    # Helper functions
+    # Tabs within Rules tab
+    rules_tab1, rules_tab2 = st.tabs(["📋 Rules", "📦 Rule Packs"])
+    
+    with rules_tab1:
+        # Helper functions
     def list_rules(vendor: Optional[str] = None, enabled: Optional[bool] = None) -> Dict[str, Any]:
         """List all rules."""
         url = f"{API_BASE_URL}/api/v1/rules/"
@@ -1731,6 +1836,100 @@ with tab_rules:
                     st.error("❌ Invalid JSON in match criteria")
                 except Exception as e:
                     st.error(f"❌ Error creating rule: {str(e)}")
+    
+    with rules_tab2:
+        st.subheader("📦 Rule Packs")
+        st.markdown("Manage rule packs - groups of rules organized by security focus area.")
+        
+        # Helper functions for rule packs
+        def list_rule_packs() -> Dict[str, Any]:
+            """List all rule packs."""
+            url = f"{API_BASE_URL}/api/v1/rule-packs/"
+            headers = get_headers()
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                handle_api_error(e)
+                return {"items": [], "total": 0}
+        
+        def get_rule_pack(pack_id: int) -> Optional[Dict[str, Any]]:
+            """Get a specific rule pack."""
+            url = f"{API_BASE_URL}/api/v1/rule-packs/{pack_id}"
+            headers = get_headers()
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                handle_api_error(e)
+                return None
+        
+        # List rule packs
+        packs_data = list_rule_packs()
+        
+        if packs_data.get("items"):
+            packs_df_data = []
+            for pack in packs_data["items"]:
+                pack_type = "🔧 Built-in" if pack.get("is_builtin") else "📝 Custom"
+                packs_df_data.append({
+                    "ID": pack.get("id"),
+                    "Name": pack.get("name", "N/A"),
+                    "Category": pack.get("category", "N/A"),
+                    "Type": pack_type,
+                    "Rules": pack.get("rule_count", 0),
+                    "Status": "✅ Enabled" if pack.get("enabled") else "❌ Disabled",
+                })
+            
+            packs_df = pd.DataFrame(packs_df_data)
+            st.dataframe(packs_df, use_container_width=True, hide_index=True)
+            
+            # Pack details
+            st.subheader("📄 Pack Details")
+            pack_ids = [p.get("id") for p in packs_data["items"]]
+            selected_pack_id = st.selectbox(
+                "Select pack to view details:",
+                options=pack_ids,
+                format_func=lambda x: f"ID {x} - {next((p.get('name', 'N/A') for p in packs_data['items'] if p.get('id') == x), 'N/A')}",
+                key="pack_detail_select"
+            )
+            
+            if selected_pack_id:
+                pack_detail = get_rule_pack(selected_pack_id)
+                if pack_detail:
+                    col_pack_info, col_pack_rules = st.columns([1, 1])
+                    
+                    with col_pack_info:
+                        st.markdown("### Pack Information")
+                        st.json({
+                            "Name": pack_detail.get("name"),
+                            "Description": pack_detail.get("description"),
+                            "Category": pack_detail.get("category"),
+                            "Type": "Built-in" if pack_detail.get("is_builtin") else "Custom",
+                            "Enabled": pack_detail.get("enabled"),
+                            "Rule Count": pack_detail.get("rule_count", 0),
+                        })
+                    
+                    with col_pack_rules:
+                        st.markdown("### Rules in Pack")
+                        rules = pack_detail.get("rules", [])
+                        if rules:
+                            rules_df_data = []
+                            for rule in rules:
+                                rules_df_data.append({
+                                    "ID": rule.get("id"),
+                                    "Name": rule.get("name", "N/A"),
+                                    "Severity": rule.get("severity", "N/A"),
+                                    "Category": rule.get("category", "N/A"),
+                                    "Status": "✅ Enabled" if rule.get("enabled") else "❌ Disabled",
+                                })
+                            rules_df = pd.DataFrame(rules_df_data)
+                            st.dataframe(rules_df, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No rules in this pack.")
+        else:
+            st.info("No rule packs found. Built-in packs are seeded on startup.")
 
 # Admin tab
 if tab_admin:

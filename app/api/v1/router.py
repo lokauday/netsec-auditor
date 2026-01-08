@@ -3,7 +3,7 @@ API v1 router.
 """
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import upload, audit, configs, audits, api_keys, activity, rules, devices
+from app.api.v1.endpoints import upload, audit, configs, audits, api_keys, activity, rules, devices, rule_packs
 from app.api.v1.endpoints.api_keys import auth_router
 
 api_router = APIRouter()
@@ -17,4 +17,5 @@ api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(activity.router, prefix="/activity", tags=["activity"])
 api_router.include_router(rules.router, prefix="/rules", tags=["rules"])
 api_router.include_router(devices.router, prefix="/devices", tags=["devices"])
+api_router.include_router(rule_packs.router, prefix="/rule-packs", tags=["rule-packs"])
 

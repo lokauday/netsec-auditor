@@ -3,6 +3,7 @@ Rule model for custom security rules.
 """
 from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, Enum
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 import enum
 
 from app.core.database import Base
@@ -53,4 +54,7 @@ class Rule(Base):
     
     # Optional: link to previous version for versioning
     previous_rule_id = Column(Integer, nullable=True)
+    
+    # Relationships
+    rule_packs = relationship("RulePack", secondary="rule_pack_rules", back_populates="rules")
 

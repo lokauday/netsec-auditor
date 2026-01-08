@@ -10,6 +10,7 @@ from app.models.api_key import APIKey
 from app.models.activity_log import ActivityLog
 from app.models.rule import Rule
 from app.models.device import Device
+from app.models.rule_pack import RulePack, DeviceRulePack
 
 __all__ = [
     "ConfigFile",
@@ -23,5 +24,7 @@ __all__ = [
     "ActivityLog",
     "Rule",
     "Device",
+    "RulePack",
+    "DeviceRulePack",
 ]
 

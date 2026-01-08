@@ -29,6 +29,8 @@ from app.models import (
     ActivityLog,
     Rule,
     Device,
+    RulePack,
+    DeviceRulePack,
 )
 
 # Setup logging
@@ -43,6 +45,16 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up NetSec Auditor API...")
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
+    
+    # Seed built-in rule packs
+    from app.core.database import SessionLocal
+    from app.services.rule_pack_seeder import ensure_rule_packs_seeded
+    db = SessionLocal()
+    try:
+        ensure_rule_packs_seeded(db)
+    finally:
+        db.close()
+    
     yield
     # Shutdown
     logger.info("Shutting down NetSec Auditor API...")

@@ -55,4 +55,5 @@ class Device(Base):
     # Relationships
     config_files = relationship("ConfigFile", back_populates="device", cascade="all, delete-orphan")
     last_audit = relationship("AuditRecord", foreign_keys=[last_audit_id])
+    device_rule_packs = relationship("DeviceRulePack", back_populates="device", cascade="all, delete-orphan")
 
