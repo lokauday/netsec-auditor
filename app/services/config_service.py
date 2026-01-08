@@ -33,7 +33,11 @@ class ConfigService:
         """
         self.db = db
         self.upload_dir = Path(settings.UPLOAD_DIR)
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.upload_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.error(f"Failed to create upload directory {self.upload_dir}: {e}")
+            raise ValueError(f"Cannot create upload directory: {e}")
     
     def save_config_file(
         self,
@@ -70,7 +74,11 @@ class ConfigService:
         
         # Save file to disk
         file_path = self.upload_dir / f"{vendor.value}_{filename}"
-        file_path.write_bytes(content)
+        try:
+            file_path.write_bytes(content)
+        except Exception as e:
+            logger.error(f"Failed to write file to {file_path}: {e}")
+            raise ValueError(f"Cannot save file to disk: {e}")
         
         # Create database record
         config_file = ConfigFile(

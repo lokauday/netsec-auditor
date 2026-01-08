@@ -127,13 +127,20 @@ async def upload_config_file(
             detail=str(e)
         )
     except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
         logger.error(
-            f"Error during config upload (type: {type(e).__name__}): {e}",
+            f"Error during config upload (type: {error_type}): {error_msg}",
             exc_info=True
         )
+        # In debug mode, return more detailed error information
+        if settings.DEBUG:
+            detail = f"Failed to upload configuration file: {error_type}: {error_msg}"
+        else:
+            detail = "Failed to upload configuration file. Check server logs for details."
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to upload configuration file"
+            detail=detail
         )
 
 

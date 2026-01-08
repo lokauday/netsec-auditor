@@ -49,25 +49,38 @@ def log_activity(
             ip_address = forwarded_for.split(",")[0].strip()
         user_agent = request.headers.get("User-Agent")
     
-    activity = ActivityLog(
-        actor_id=client.api_key_id,
-        actor_source=client.source,
-        actor_role=client.role,
-        action=action,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        details=details,
-        ip_address=ip_address,
-        user_agent=user_agent,
-    )
-    
-    db.add(activity)
-    db.commit()
-    db.refresh(activity)
-    
-    logger.debug(f"Logged activity: {action} by {client.role} ({client.source})")
-    
-    return activity
+    try:
+        activity = ActivityLog(
+            actor_id=client.api_key_id,
+            actor_source=client.source,
+            actor_role=client.role,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            details=details,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        
+        db.add(activity)
+        db.commit()
+        db.refresh(activity)
+        
+        logger.debug(f"Logged activity: {action} by {client.role} ({client.source})")
+        
+        return activity
+    except Exception as e:
+        # Don't fail the entire request if activity logging fails
+        # Log the error but don't raise it
+        logger.error(f"Failed to log activity {action}: {e}", exc_info=True)
+        # Try to rollback to avoid leaving the session in a bad state
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        # Return a dummy activity object so the caller doesn't break
+        # (This is a fallback - the activity won't be in the DB, but the main operation can succeed)
+        return None
 
 
 # Common action constants
