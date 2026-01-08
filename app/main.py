@@ -28,6 +28,7 @@ from app.models import (
     APIKey,
     ActivityLog,
     Rule,
+    Device,
 )
 
 # Setup logging

@@ -44,6 +44,7 @@ class ConfigService:
         device_ip: Optional[str] = None,
         environment: Optional[str] = None,
         location: Optional[str] = None,
+        device_id: Optional[int] = None,
     ) -> ConfigFile:
         """
         Save uploaded configuration file.
@@ -82,6 +83,7 @@ class ConfigService:
             device_ip=device_ip,
             environment=environment,
             location=location,
+            device_id=device_id,
         )
         self.db.add(config_file)
         self.db.commit()

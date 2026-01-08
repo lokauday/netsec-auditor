@@ -17,6 +17,7 @@ class ConfigFileResponse(BaseModel):
     device_ip: Optional[str] = None
     environment: Optional[str] = None
     location: Optional[str] = None
+    device_id: Optional[int] = None
     
     model_config = {"from_attributes": True}
 

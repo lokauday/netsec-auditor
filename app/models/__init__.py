@@ -9,6 +9,7 @@ from app.models.audit_record import AuditRecord
 from app.models.api_key import APIKey
 from app.models.activity_log import ActivityLog
 from app.models.rule import Rule
+from app.models.device import Device
 
 __all__ = [
     "ConfigFile",
@@ -21,5 +22,6 @@ __all__ = [
     "APIKey",
     "ActivityLog",
     "Rule",
+    "Device",
 ]
 

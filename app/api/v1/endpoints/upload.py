@@ -25,6 +25,7 @@ async def upload_config_file(
     device_ip: Optional[str] = Form(None, description="Device IP address"),
     environment: Optional[str] = Form(None, description="Environment (e.g., prod, dev, lab)"),
     location: Optional[str] = Form(None, description="Location or data center name"),
+    device_id: Optional[int] = Form(None, description="Existing device ID to link config to"),
     client: APIClient = Depends(require_role("operator")),  # Changed from read_only to operator
     request: Request = None,
     db: Session = Depends(get_db)
@@ -58,6 +59,17 @@ async def upload_config_file(
                 detail=f"File size exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE} bytes"
             )
         
+        # Handle device linking
+        from app.models.device import Device
+        
+        linked_device_id = device_id
+        
+        # If device_id not provided but device_name is, try to find existing device
+        if not linked_device_id and device_name:
+            existing_device = db.query(Device).filter(Device.hostname == device_name).first()
+            if existing_device:
+                linked_device_id = existing_device.id
+        
         # Save and parse
         service = ConfigService(db)
         config_file = service.save_config_file(
@@ -67,6 +79,7 @@ async def upload_config_file(
             device_ip=device_ip,
             environment=environment,
             location=location,
+            device_id=linked_device_id,
         )
         
         logger.info(
@@ -105,6 +118,7 @@ async def upload_config_file(
             device_ip=config_file.device_ip,
             environment=config_file.environment,
             location=config_file.location,
+            device_id=config_file.device_id,
         )
     except ValueError as e:
         logger.error(f"Validation error during upload: {e}")

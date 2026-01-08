@@ -1,5 +1,5 @@
 """Config file database model."""
-from sqlalchemy import Column, Integer, String, DateTime, Text, Enum
+from sqlalchemy import Column, Integer, String, DateTime, Text, Enum, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import enum
@@ -28,13 +28,17 @@ class ConfigFile(Base):
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
     parsed_at = Column(DateTime(timezone=True), nullable=True)
     
-    # Device metadata
+    # Device metadata (kept for backward compatibility)
     device_name = Column(String(255), nullable=True, index=True)
     device_ip = Column(String(255), nullable=True)
     environment = Column(String(50), nullable=True, index=True)  # e.g., prod, dev, lab
     location = Column(String(255), nullable=True, index=True)  # site or DC name
     
+    # Device relationship
+    device_id = Column(Integer, ForeignKey("devices.id"), nullable=True, index=True)
+    
     # Relationships
+    device = relationship("Device", back_populates="config_files")
     acls = relationship("ACL", back_populates="config_file", cascade="all, delete-orphan")
     nat_rules = relationship("NATRule", back_populates="config_file", cascade="all, delete-orphan")
     vpns = relationship("VPN", back_populates="config_file", cascade="all, delete-orphan")

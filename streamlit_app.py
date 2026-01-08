@@ -502,12 +502,12 @@ if st.session_state.config_id and not st.session_state.config_history:
         pass  # Fail silently if history can't be loaded
 
 # Tabs for organization
-tab_names = ["📊 Overview", "📋 Findings", "📜 History", "🔧 Rules", "📝 Audit Trail"]
+tab_names = ["📊 Overview", "📋 Findings", "📜 History", "🖥️ Devices", "🔧 Rules", "📝 Audit Trail"]
 if st.session_state.is_admin:
     tab_names.append("🔐 Admin: API Keys")
 tabs = st.tabs(tab_names)
-tab1, tab2, tab3, tab_rules, tab_audit = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
-tab_admin = tabs[5] if st.session_state.is_admin else None
+tab1, tab2, tab3, tab_devices, tab_rules, tab_audit = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5]
+tab_admin = tabs[6] if st.session_state.is_admin else None
 
 with tab1:
     # Section 1: Current Config
@@ -1124,6 +1124,214 @@ with tab3:
         st.info("No audits found for the selected filters.")
     elif not history_result:
         st.warning("Could not load audit history. Check backend URL and API key.")
+
+# ============= Devices Tab =============
+with tab_devices:
+    st.header("🖥️ Device Inventory")
+    st.markdown("Centralized view of all network devices and their security posture.")
+    
+    # Helper functions
+    def list_devices(site: Optional[str] = None, environment: Optional[str] = None, vendor: Optional[str] = None) -> Dict[str, Any]:
+        """List all devices."""
+        url = f"{API_BASE_URL}/api/v1/devices/"
+        headers = get_headers()
+        params = {}
+        if site:
+            params["site"] = site
+        if environment:
+            params["environment"] = environment
+        if vendor:
+            params["vendor"] = vendor
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return {"items": [], "total": 0}
+    
+    def get_device(device_id: int) -> Optional[Dict[str, Any]]:
+        """Get a specific device."""
+        url = f"{API_BASE_URL}/api/v1/devices/{device_id}"
+        headers = get_headers()
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return None
+    
+    def create_device(device_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new device."""
+        url = f"{API_BASE_URL}/api/v1/devices/"
+        headers = get_headers()
+        try:
+            response = requests.post(url, headers=headers, json=device_data, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return None
+    
+    # Filters
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        filter_site = st.text_input("Filter by Site", value="", key="device_filter_site")
+    with col2:
+        filter_environment = st.selectbox(
+            "Filter by Environment",
+            options=["All", "prod", "dev", "test", "staging", "lab", "cloud", "dmz"],
+            index=0,
+            key="device_filter_env"
+        )
+    with col3:
+        filter_vendor = st.selectbox(
+            "Filter by Vendor",
+            options=["All", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"],
+            index=0,
+            key="device_filter_vendor"
+        )
+    
+    if st.button("🔄 Refresh", use_container_width=False, key="device_refresh"):
+        st.rerun()
+    
+    # List devices
+    devices_data = list_devices(
+        site=filter_site if filter_site else None,
+        environment=filter_environment if filter_environment != "All" else None,
+        vendor=filter_vendor if filter_vendor != "All" else None
+    )
+    
+    if devices_data.get("items"):
+        devices_df_data = []
+        for device in devices_data["items"]:
+            risk_score = device.get("last_risk_score")
+            risk_display = f"{risk_score:.1f}" if risk_score is not None else "N/A"
+            risk_color = "🔴" if risk_score and risk_score >= 70 else ("🟡" if risk_score and risk_score >= 40 else ("🟢" if risk_score is not None else "⚪"))
+            
+            devices_df_data.append({
+                "ID": device.get("id"),
+                "Hostname": device.get("hostname", "N/A"),
+                "IP": device.get("mgmt_ip", "N/A"),
+                "Vendor": device.get("vendor", "N/A"),
+                "Site": device.get("site", "N/A"),
+                "Environment": device.get("environment", "N/A"),
+                "Risk Score": f"{risk_color} {risk_display}",
+                "Owner": device.get("owner", "N/A"),
+            })
+        
+        devices_df = pd.DataFrame(devices_df_data)
+        st.dataframe(devices_df, use_container_width=True, hide_index=True)
+        
+        # Device details
+        st.subheader("📄 Device Details")
+        device_ids = [d.get("id") for d in devices_data["items"]]
+        selected_device_id = st.selectbox(
+            "Select device to view details:",
+            options=device_ids,
+            format_func=lambda x: f"ID {x} - {next((d.get('hostname', 'N/A') for d in devices_data['items'] if d.get('id') == x), 'N/A')}"
+        )
+        
+        if selected_device_id:
+            device_detail = get_device(selected_device_id)
+            if device_detail:
+                col_info, col_metrics = st.columns(2)
+                
+                with col_info:
+                    st.markdown("### Device Information")
+                    st.json({
+                        "Hostname": device_detail.get("hostname"),
+                        "Management IP": device_detail.get("mgmt_ip"),
+                        "Vendor": device_detail.get("vendor"),
+                        "Model": device_detail.get("model"),
+                        "Site": device_detail.get("site"),
+                        "Environment": device_detail.get("environment"),
+                        "Owner": device_detail.get("owner"),
+                        "Tags": device_detail.get("tags"),
+                    })
+                
+                with col_metrics:
+                    st.markdown("### Security Metrics")
+                    risk_score = device_detail.get("last_risk_score")
+                    hygiene_score = device_detail.get("last_policy_hygiene_score")
+                    
+                    if risk_score is not None:
+                        st.metric("Last Risk Score", f"{risk_score:.1f}/100", delta=None)
+                    else:
+                        st.metric("Last Risk Score", "N/A", delta=None)
+                    
+                    if hygiene_score is not None:
+                        st.metric("Policy Hygiene Score", f"{hygiene_score:.1f}/100", delta=None)
+                    else:
+                        st.metric("Policy Hygiene Score", "N/A", delta=None)
+                    
+                    st.metric("Config Files", device_detail.get("config_count", 0))
+                
+                st.markdown("---")
+                st.markdown("### Related Configurations")
+                config_count = device_detail.get("config_count", 0)
+                if config_count > 0:
+                    latest_config_id = device_detail.get("latest_config_id")
+                    latest_uploaded = device_detail.get("latest_config_uploaded_at")
+                    st.info(f"Latest config: ID {latest_config_id} (uploaded: {latest_uploaded[:19] if latest_uploaded else 'N/A'})")
+                    
+                    if latest_config_id:
+                        if st.button(f"📂 Load Config {latest_config_id}", use_container_width=True, key=f"load_config_{latest_config_id}"):
+                            try:
+                                config_detail = get_config_detail(latest_config_id)
+                                st.session_state.current_config = config_detail
+                                st.session_state.config_id = latest_config_id
+                                st.success(f"Config {latest_config_id} loaded!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to load config: {str(e)}")
+                else:
+                    st.info("No configurations uploaded for this device yet.")
+    else:
+        st.info("No devices found matching the filters.")
+    
+    st.markdown("---")
+    
+    # Create new device
+    st.subheader("➕ Create New Device")
+    
+    with st.form("create_device_form"):
+        new_device_hostname = st.text_input("Hostname *", help="Device hostname (required)")
+        new_device_ip = st.text_input("Management IP", help="Device management IP address")
+        new_device_vendor = st.selectbox(
+            "Vendor",
+            options=["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"]
+        )
+        new_device_model = st.text_input("Model", help="Device model")
+        new_device_site = st.text_input("Site", help="Site or data center name")
+        new_device_env = st.selectbox(
+            "Environment",
+            options=["", "prod", "dev", "test", "staging", "lab", "cloud", "dmz"]
+        )
+        new_device_owner = st.text_input("Owner", help="Team or person responsible")
+        
+        submitted = st.form_submit_button("🖥️ Create Device", use_container_width=True)
+        
+        if submitted:
+            if not new_device_hostname or not new_device_hostname.strip():
+                st.error("⚠️ Please provide a hostname")
+            else:
+                device_data = {
+                    "hostname": new_device_hostname.strip(),
+                    "mgmt_ip": new_device_ip.strip() if new_device_ip else None,
+                    "vendor": new_device_vendor if new_device_vendor else None,
+                    "model": new_device_model.strip() if new_device_model else None,
+                    "site": new_device_site.strip() if new_device_site else None,
+                    "environment": new_device_env if new_device_env else None,
+                    "owner": new_device_owner.strip() if new_device_owner else None,
+                }
+                
+                with st.spinner("Creating device..."):
+                    result = create_device(device_data)
+                    if result:
+                        st.success("✅ Device created successfully!")
+                        st.rerun()
 
 # ============= Rules Tab =============
 with tab_rules:
