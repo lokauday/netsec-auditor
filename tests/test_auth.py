@@ -55,12 +55,12 @@ def test_upload_with_invalid_api_key_fails(client_with_auth):
 
 def test_upload_with_db_api_key_succeeds(client_with_auth, db_session):
     """Test that requests with valid DB API key succeed."""
-    # Create a DB API key with hashed key
+    # Create a DB API key with hashed key (operator role for upload)
     raw_key = "db-test-key-12345"
     db_key = APIKey(
         key_hash=hash_api_key(raw_key),
         label="Test DB Key",
-        role="read_only",
+        role="operator",  # Upload requires operator role
         is_active=True
     )
     db_session.add(db_key)
@@ -77,26 +77,34 @@ def test_upload_with_db_api_key_succeeds(client_with_auth, db_session):
 
 
 def test_read_only_role_can_access_endpoints(client_with_auth, db_session):
-    """Test that read_only role can access endpoints requiring read_only."""
-    # Create a read_only DB API key with hashed key
+    """Test that viewer role (normalized from read_only) can access read-only endpoints."""
+    # Create a viewer DB API key with hashed key (read_only normalizes to viewer)
     raw_key = "readonly-key-12345"
     db_key = APIKey(
         key_hash=hash_api_key(raw_key),
-        label="Read Only Key",
-        role="read_only",
+        label="Viewer Key",
+        role="viewer",  # Use viewer directly (or read_only which normalizes to viewer)
         is_active=True
     )
     db_session.add(db_key)
     db_session.commit()
     
-    # Upload should work (requires read_only)
+    # Upload should NOT work (requires operator, viewer is read-only)
     response = client_with_auth.post(
         "/api/v1/upload/",
         files={"file": ("test_config.txt", SAMPLE_ASA_CONFIG.encode(), "text/plain")},
         headers={"X-API-Key": raw_key}
     )
     
-    assert response.status_code == status.HTTP_201_CREATED
+    assert response.status_code == status.HTTP_403_FORBIDDEN  # Viewer cannot upload
+    
+    # But viewer can read configs
+    response = client_with_auth.get(
+        "/api/v1/configs/",
+        headers={"X-API-Key": raw_key}
+    )
+    
+    assert response.status_code == status.HTTP_200_OK  # Viewer can read
 
 
 def test_admin_role_can_access_endpoints(client_with_auth):

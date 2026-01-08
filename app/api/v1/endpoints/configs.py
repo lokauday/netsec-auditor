@@ -35,7 +35,7 @@ router = APIRouter()
 async def list_configs(
     limit: int = Query(default=20, ge=1, le=100, description="Number of items per page"),
     offset: int = Query(default=0, ge=0, description="Number of items to skip"),
-    _client = Depends(require_role("read_only")),
+    _client = Depends(require_role("viewer")),
     db: Session = Depends(get_db),
 ):
     """
@@ -219,7 +219,7 @@ async def get_config_detail(
 @router.get("/{config_id}/audits", response_model=AuditHistoryResponse)
 async def get_config_audit_history(
     config_id: int,
-    _client = Depends(require_role("read_only")),
+    _client = Depends(require_role("viewer")),
     db: Session = Depends(get_db),
 ):
     """

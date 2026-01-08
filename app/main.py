@@ -26,6 +26,7 @@ from app.models import (
     Route,
     AuditRecord,
     APIKey,
+    ActivityLog,
 )
 
 # Setup logging

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.roles import Role, ROLE_HIERARCHY, normalize_role, has_permission
 from app.models.api_key import APIKey
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,10 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 class APIClient:
     """Simple object representing an authenticated API client."""
-    def __init__(self, source: str, role: str):
+    def __init__(self, source: str, role: str, api_key_id: Optional[int] = None):
         self.source = source  # "static" or "db"
-        self.role = role  # "admin" or "read_only" or "unknown"
+        self.role = normalize_role(role)  # Normalized role (viewer, operator, security_analyst, auditor, admin)
+        self.api_key_id = api_key_id  # Database API key ID if from DB, None if static
 
 
 def get_current_api_client(
@@ -51,7 +53,7 @@ def get_current_api_client(
     # If API_KEY is not configured, skip authentication (for testing/dev)
     if not settings.API_KEY or settings.API_KEY.strip() == "":
         logger.debug("API_KEY not configured - authentication is disabled (TESTING mode)")
-        return APIClient(source="static", role="admin")  # Default to admin in testing mode
+        return APIClient(source="static", role=Role.ADMIN.value)  # Default to admin in testing mode
     
     # Check if API key is provided
     if not api_key:
@@ -65,7 +67,7 @@ def get_current_api_client(
     # First, check if it matches the static API key
     if api_key == settings.API_KEY:
         logger.debug("Authenticated with static API key")
-        return APIClient(source="static", role="admin")
+        return APIClient(source="static", role=Role.ADMIN.value)
     
     # Then, check database API keys (using hash comparison)
     from app.api.v1.endpoints.api_keys import hash_api_key, verify_api_key_hash
@@ -85,8 +87,9 @@ def get_current_api_client(
         db_key.last_used_at = datetime.now(timezone.utc)
         db.commit()
         
-        logger.debug(f"Authenticated with DB API key: {db_key.label or db_key.id} (role: {db_key.role})")
-        return APIClient(source="db", role=db_key.role)
+        normalized_role = normalize_role(db_key.role)
+        logger.debug(f"Authenticated with DB API key: {db_key.label or db_key.id} (role: {normalized_role})")
+        return APIClient(source="db", role=normalized_role, api_key_id=db_key.id)
     
     # Invalid API key
     logger.warning(f"Invalid API key attempted: {api_key[:4]}...")
@@ -97,21 +100,17 @@ def get_current_api_client(
     )
 
 
-def require_role(min_role: str = "read_only"):
+def require_role(min_role: str = "viewer"):
     """
     Dependency factory for role-based access control.
     
     Args:
-        min_role: Minimum required role ("read_only" or "admin")
+        min_role: Minimum required role (viewer, operator, security_analyst, auditor, admin)
+                  Also accepts legacy "read_only" (maps to viewer)
         
     Returns:
         Dependency function that checks role permissions
     """
-    role_hierarchy = {
-        "read_only": 1,
-        "admin": 2,
-    }
-    
     def check_role(client: APIClient = Depends(get_current_api_client)) -> APIClient:
         """
         Check if the API client has the required role.
@@ -125,16 +124,14 @@ def require_role(min_role: str = "read_only"):
         Raises:
             HTTPException: If client doesn't have required role
         """
-        client_level = role_hierarchy.get(client.role, 0)
-        required_level = role_hierarchy.get(min_role, 0)
-        
-        if client_level < required_level:
+        if not has_permission(client.role, min_role):
+            normalized_min = normalize_role(min_role)
             logger.warning(
-                f"Access denied: client role '{client.role}' does not meet minimum requirement '{min_role}'"
+                f"Access denied: client role '{client.role}' does not meet minimum requirement '{normalized_min}'"
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions. Required role: {min_role}",
+                detail=f"Insufficient permissions. Required role: {normalized_min}",
             )
         
         return client
@@ -154,3 +151,9 @@ def verify_api_key(
     """
     client = get_current_api_client(api_key=api_key, db=db)
     return api_key or ""
+
+
+# Backward compatibility: allow "read_only" as alias for "viewer"
+def require_read_only():
+    """Backward compatibility: require read_only (maps to viewer)."""
+    return require_role("viewer")

@@ -3,12 +3,13 @@ Upload endpoint for configuration files.
 """
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, Security
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, Security, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.auth import require_role
+from app.core.auth import require_role, get_current_api_client, APIClient
 from app.services.config_service import ConfigService
+from app.services.activity_service import log_activity, ActivityAction, ResourceType
 from app.schemas.config import ConfigFileResponse, ConfigParseResponse
 from app.core.config import settings
 
@@ -24,7 +25,8 @@ async def upload_config_file(
     device_ip: Optional[str] = Form(None, description="Device IP address"),
     environment: Optional[str] = Form(None, description="Environment (e.g., prod, dev, lab)"),
     location: Optional[str] = Form(None, description="Location or data center name"),
-    _client = Depends(require_role("read_only")),
+    client: APIClient = Depends(require_role("operator")),  # Changed from read_only to operator
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -74,6 +76,23 @@ async def upload_config_file(
             f"device_name={device_name}, environment={environment}"
         )
         
+        # Log activity
+        log_activity(
+            db=db,
+            client=client,
+            action=ActivityAction.CONFIG_UPLOAD,
+            resource_type=ResourceType.CONFIG_FILE,
+            resource_id=config_file.id,
+            details={
+                "filename": file.filename,
+                "vendor": config_file.vendor.value,
+                "file_size": config_file.file_size,
+                "device_name": device_name,
+                "environment": environment,
+            },
+            request=request,
+        )
+        
         return ConfigFileResponse(
             id=config_file.id,
             filename=config_file.filename,
@@ -107,7 +126,8 @@ async def upload_config_file(
 @router.post("/{config_file_id}/parse", response_model=ConfigParseResponse)
 async def parse_config_file(
     config_file_id: int,
-    _client = Depends(require_role("read_only")),
+    client: APIClient = Depends(require_role("operator")),  # Changed from read_only to operator
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -135,6 +155,26 @@ async def parse_config_file(
             f"vendor={config_file.vendor.value}, "
             f"elements=[ACLs:{acl_count}, NAT:{nat_count}, VPNs:{vpn_count}, "
             f"Interfaces:{interface_count}, Routes:{route_count}]"
+        )
+        
+        # Log activity
+        log_activity(
+            db=db,
+            client=client,
+            action=ActivityAction.CONFIG_PARSE,
+            resource_type=ResourceType.CONFIG_FILE,
+            resource_id=config_file_id,
+            details={
+                "vendor": config_file.vendor.value,
+                "elements_parsed": {
+                    "acls": acl_count,
+                    "nat_rules": nat_count,
+                    "vpns": vpn_count,
+                    "interfaces": interface_count,
+                    "routes": route_count,
+                }
+            },
+            request=request,
         )
         
         return ConfigParseResponse(

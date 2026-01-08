@@ -35,7 +35,7 @@ async def get_audit_summary(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     vendor: Optional[str] = Query(None, description="Filter by vendor"),
     environment: Optional[str] = Query(None, description="Filter by environment"),
-    _client = Depends(require_role("read_only")),
+    _client = Depends(require_role("viewer")),
     db: Session = Depends(get_db),
 ):
     """
@@ -155,7 +155,7 @@ async def get_audit_history(
     environment: Optional[str] = Query(None, description="Filter by environment"),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of results"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
-    _client = Depends(require_role("read_only")),
+    _client = Depends(require_role("viewer")),
     db: Session = Depends(get_db),
 ):
     """
@@ -268,7 +268,7 @@ async def get_audit_history(
 @router.get("/{audit_id}", response_model=AuditRecordResponse)
 async def get_audit_record(
     audit_id: int,
-    _client = Depends(require_role("read_only")),
+    _client = Depends(require_role("viewer")),
     db: Session = Depends(get_db),
 ):
     """

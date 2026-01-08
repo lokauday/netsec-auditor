@@ -5,13 +5,14 @@ import logging
 import secrets
 import hashlib
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from datetime import datetime
 
 from app.core.database import get_db
-from app.core.auth import require_role, get_current_api_client
+from app.core.auth import require_role, get_current_api_client, APIClient
 from app.models.api_key import APIKey
+from app.services.activity_service import log_activity, ActivityAction, ResourceType
 from app.schemas.api_key import (
     APIKeyCreateRequest,
     APIKeyResponse,
@@ -89,7 +90,8 @@ async def list_api_keys(
 @router.post("/", response_model=APIKeyCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_api_key(
     request: APIKeyCreateRequest,
-    _client = Depends(require_role("admin")),
+    client: APIClient = Depends(require_role("admin")),
+    http_request: Request = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -98,12 +100,8 @@ async def create_api_key(
     Returns the full key once in the response. Store only the hashed key in DB.
     """
     try:
-        # Validate role
-        if request.role not in ["admin", "read_only"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Role must be 'admin' or 'read_only'"
-            )
+        # Role is validated and normalized by schema validator
+        # No additional validation needed here
         
         # Generate new key
         new_key = generate_api_key()
@@ -136,6 +134,20 @@ async def create_api_key(
         logger.info(f"Created API key: id={db_key.id}, label={request.name}, role={request.role}")
         # Note: We log creation but not the full key value
         
+        # Log activity
+        log_activity(
+            db=db,
+            client=client,
+            action=ActivityAction.API_KEY_CREATE,
+            resource_type=ResourceType.API_KEY,
+            resource_id=db_key.id,
+            details={
+                "label": request.name,
+                "role": request.role,
+            },
+            request=http_request,
+        )
+        
         return APIKeyCreateResponse(
             id=db_key.id,
             name=db_key.label,
@@ -159,7 +171,8 @@ async def create_api_key(
 async def update_api_key(
     key_id: int,
     request: APIKeyUpdateRequest,
-    _client = Depends(require_role("admin")),
+    client: APIClient = Depends(require_role("admin")),
+    http_request: Request = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -179,11 +192,7 @@ async def update_api_key(
         if request.label is not None:
             db_key.label = request.label
         if request.role is not None:
-            if request.role not in ["admin", "read_only"]:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Role must be 'admin' or 'read_only'"
-                )
+            # Role is validated and normalized by schema validator
             db_key.role = request.role
         if request.is_active is not None:
             db_key.is_active = request.is_active
@@ -192,6 +201,25 @@ async def update_api_key(
         db.refresh(db_key)
         
         logger.info(f"Updated API key: id={key_id}")
+        
+        # Log activity
+        update_details = {}
+        if request.label is not None:
+            update_details["label"] = request.label
+        if request.role is not None:
+            update_details["role"] = request.role
+        if request.is_active is not None:
+            update_details["is_active"] = request.is_active
+        
+        log_activity(
+            db=db,
+            client=client,
+            action=ActivityAction.API_KEY_UPDATE,
+            resource_type=ResourceType.API_KEY,
+            resource_id=key_id,
+            details=update_details,
+            request=http_request,
+        )
         
         return APIKeyResponse(
             id=db_key.id,
@@ -216,7 +244,8 @@ async def update_api_key(
 @router.delete("/{key_id}", status_code=status.HTTP_200_OK)
 async def delete_api_key(
     key_id: int,
-    _client = Depends(require_role("admin")),
+    client: APIClient = Depends(require_role("admin")),
+    request: Request = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -236,6 +265,17 @@ async def delete_api_key(
         db.commit()
         
         logger.info(f"Deleted (deactivated) API key: id={key_id}")
+        
+        # Log activity
+        log_activity(
+            db=db,
+            client=client,
+            action=ActivityAction.API_KEY_DEACTIVATE,
+            resource_type=ResourceType.API_KEY,
+            resource_id=key_id,
+            details={},
+            request=request,
+        )
         
         return {"message": "API key deleted successfully", "id": key_id, "is_active": False}
     except HTTPException:
@@ -265,5 +305,6 @@ async def get_current_user_info(
         "role": client.role,
         "source": client.source,
         "is_admin": client.role == "admin",
+        "api_key_id": client.api_key_id,
     }
 

@@ -1,13 +1,21 @@
 """Schemas for API key management."""
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.roles import VALID_ROLES, normalize_role
 
 
 class APIKeyCreateRequest(BaseModel):
     """Request schema for creating a new API key."""
     name: str = Field(..., min_length=1, max_length=255, description="Label/name for the API key")
-    role: str = Field(..., description="Role: 'admin' or 'read_only'")
+    role: str = Field(..., description="Role: viewer, operator, security_analyst, auditor, or admin")
+    
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        """Normalize and validate role."""
+        return normalize_role(v)
 
 
 class APIKeyResponse(BaseModel):
@@ -28,6 +36,14 @@ class APIKeyUpdateRequest(BaseModel):
     label: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize and validate role if provided."""
+        if v is None:
+            return None
+        return normalize_role(v)
 
 
 class APIKeyCreateResponse(BaseModel):

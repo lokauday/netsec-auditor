@@ -84,7 +84,7 @@ def test_admin_can_create_api_key(client_with_auth, db_session):
     assert "id" in data
     assert "key" in data
     assert data["name"] == "New Test Key"
-    assert data["role"] == "read_only"
+    assert data["role"] == "viewer"  # read_only is normalized to viewer
     assert data["is_active"] is True
     assert len(data["key"]) > 0  # Should have a generated key
     
@@ -202,7 +202,7 @@ def test_get_current_user_info(client_with_auth, db_session):
     
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
-    assert data["role"] == "read_only"
+    assert data["role"] == "viewer"  # read_only is normalized to viewer
     assert data["source"] == "db"
     assert data["is_admin"] is False
 

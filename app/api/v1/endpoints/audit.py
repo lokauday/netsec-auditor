@@ -4,17 +4,18 @@ Security audit endpoint.
 import io
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Security, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Security, Body, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.auth import require_role
+from app.core.auth import require_role, get_current_api_client, APIClient
 from app.models.config_file import ConfigFile
 from app.models.audit_record import AuditRecord
 from app.services.audit_service import AuditService
+from app.services.activity_service import log_activity, ActivityAction, ResourceType
 from app.schemas.audit import AuditResponse
 from app.utils.pdf_generator import PDFReportBuilder
 
@@ -32,7 +33,8 @@ class AuditRequest(BaseModel):
 async def audit_config_file(
     config_file_id: int,
     request: Optional[AuditRequest] = Body(None),
-    _client = Depends(require_role("read_only")),
+    client: APIClient = Depends(require_role("operator")),  # Changed from read_only to operator
+    http_request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -64,6 +66,22 @@ async def audit_config_file(
             f"ai_findings_count={ai_findings_count}"
         )
         
+        # Log activity
+        log_activity(
+            db=db,
+            client=client,
+            action=ActivityAction.AUDIT_RUN,
+            resource_type=ResourceType.AUDIT,
+            resource_id=config_file_id,
+            details={
+                "vendor": audit_result.get('vendor'),
+                "risk_score": audit_result['risk_score'],
+                "findings_count": len(audit_result.get('findings', [])),
+                "ai_enabled": audit_result.get('ai_enabled', False),
+            },
+            request=http_request,
+        )
+        
         return AuditResponse(**audit_result)
     except ValueError as e:
         logger.error(f"Audit error: config_id={config_file_id}, error={e}")
@@ -82,7 +100,8 @@ async def audit_config_file(
 @router.get("/{config_file_id}/report")
 async def get_audit_report(
     config_file_id: int,
-    _client = Depends(require_role("read_only")),
+    client: APIClient = Depends(require_role("auditor")),  # Changed to auditor (export reports)
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -120,6 +139,20 @@ async def get_audit_report(
             filename = f"audit_{config_file_id}.pdf"
             
             logger.info(f"Generated PDF report for config_id={config_file_id}, size={len(pdf_bytes)} bytes")
+            
+            # Log activity
+            log_activity(
+                db=db,
+                client=client,
+                action=ActivityAction.AUDIT_EXPORT,
+                resource_type=ResourceType.AUDIT,
+                resource_id=config_file_id,
+                details={
+                    "format": "pdf",
+                    "size_bytes": len(pdf_bytes),
+                },
+                request=request,
+            )
             
             return StreamingResponse(
                 io.BytesIO(pdf_bytes),

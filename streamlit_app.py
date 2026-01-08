@@ -93,6 +93,45 @@ def get_headers() -> Dict[str, str]:
     return headers
 
 
+def get_activity_logs(
+    limit: int = 50,
+    offset: int = 0,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    actor_id: Optional[int] = None,
+    action: Optional[str] = None,
+    resource_type: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch activity logs from the API."""
+    try:
+        url = f"{API_BASE_URL}/api/v1/activity/"
+        headers = get_headers()
+        params = {
+            "limit": limit,
+            "offset": offset,
+        }
+        if start_date:
+            params["start_date"] = start_date.isoformat()
+        if end_date:
+            params["end_date"] = end_date.isoformat()
+        if actor_id:
+            params["actor_id"] = actor_id
+        if action:
+            params["action"] = action
+        if resource_type:
+            params["resource_type"] = resource_type
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Failed to fetch activity logs: {response.status_code}")
+            return None
+    except requests.exceptions.RequestException as e:
+        handle_api_error(e)
+        return None
+
+
 def handle_api_error(e: requests.exceptions.RequestException) -> None:
     """Handle API errors with user-friendly messages."""
     if isinstance(e, requests.exceptions.HTTPError):
@@ -463,12 +502,12 @@ if st.session_state.config_id and not st.session_state.config_history:
         pass  # Fail silently if history can't be loaded
 
 # Tabs for organization
-tab_names = ["📊 Overview", "📋 Findings", "📜 History"]
+tab_names = ["📊 Overview", "📋 Findings", "📜 History", "📝 Audit Trail"]
 if st.session_state.is_admin:
     tab_names.append("🔐 Admin: API Keys")
 tabs = st.tabs(tab_names)
-tab1, tab2, tab3 = tabs[0], tabs[1], tabs[2]
-tab_admin = tabs[3] if st.session_state.is_admin else None
+tab1, tab2, tab3, tab_audit = tabs[0], tabs[1], tabs[2], tabs[3]
+tab_admin = tabs[4] if st.session_state.is_admin else None
 
 with tab1:
     # Section 1: Current Config
@@ -1185,8 +1224,8 @@ if tab_admin:
             new_key_name = st.text_input("Key Name/Label", help="A descriptive name for this API key")
             new_key_role = st.selectbox(
                 "Role",
-                options=["read_only", "admin"],
-                help="read_only: Can read/list resources. admin: Full access including key management."
+                options=["viewer", "operator", "security_analyst", "auditor", "admin"],
+                help="viewer: Read-only. operator: Upload/audit. security_analyst: Manage rules. auditor: Export reports. admin: Full access."
             )
             
             submitted = st.form_submit_button("🔑 Create API Key", use_container_width=True)
@@ -1217,6 +1256,112 @@ if tab_admin:
                             })
                         else:
                             st.error("❌ Failed to create API key")
+
+# ============= Audit Trail Tab =============
+with tab_audit:
+    st.header("📝 Activity Log / Audit Trail")
+    st.markdown("View all system activities and user actions for compliance and security auditing.")
+    
+    # Filters
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        filter_action = st.selectbox(
+            "Filter by Action",
+            options=["All"] + [
+                "config_upload", "config_parse", "audit_run", "audit_export",
+                "api_key_create", "api_key_update", "api_key_deactivate"
+            ],
+            index=0
+        )
+    
+    with col2:
+        filter_resource = st.selectbox(
+            "Filter by Resource Type",
+            options=["All", "config_file", "audit", "api_key"],
+            index=0
+        )
+    
+    with col3:
+        items_per_page = st.selectbox(
+            "Items per Page",
+            options=[25, 50, 100, 200],
+            index=1
+        )
+    
+    # Date range filter
+    col_date1, col_date2 = st.columns(2)
+    with col_date1:
+        start_date = st.date_input("Start Date", value=None)
+    with col_date2:
+        end_date = st.date_input("End Date", value=None)
+    
+    # Pagination
+    if "audit_trail_page" not in st.session_state:
+        st.session_state.audit_trail_page = 0
+    
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("⬅️ Previous", disabled=st.session_state.audit_trail_page == 0):
+            st.session_state.audit_trail_page = max(0, st.session_state.audit_trail_page - 1)
+            st.rerun()
+    
+    with col_next:
+        if st.button("Next ➡️"):
+            st.session_state.audit_trail_page += 1
+            st.rerun()
+    
+    # Fetch logs
+    offset = st.session_state.audit_trail_page * items_per_page
+    
+    logs_data = get_activity_logs(
+        limit=items_per_page,
+        offset=offset,
+        start_date=datetime.combine(start_date, datetime.min.time()) if start_date else None,
+        end_date=datetime.combine(end_date, datetime.max.time()) if end_date else None,
+        action=filter_action if filter_action != "All" else None,
+        resource_type=filter_resource if filter_resource != "All" else None,
+    )
+    
+    if logs_data and logs_data.get("items"):
+        total = logs_data.get("total", 0)
+        with col_info:
+            st.info(f"Showing {offset + 1}-{min(offset + items_per_page, total)} of {total} logs")
+        
+        # Display logs in a table
+        logs_df_data = []
+        for log in logs_data["items"]:
+            details_str = ""
+            if log.get("details"):
+                details_str = str(log["details"])[:100] + "..." if len(str(log["details"])) > 100 else str(log["details"])
+            
+            logs_df_data.append({
+                "Timestamp": log.get("timestamp", "N/A")[:19] if log.get("timestamp") else "N/A",
+                "Actor": f"{log.get('actor_role', 'N/A')} ({log.get('actor_source', 'N/A')})",
+                "Action": log.get("action", "N/A"),
+                "Resource": f"{log.get('resource_type', 'N/A')} #{log.get('resource_id', 'N/A')}" if log.get("resource_id") else log.get("resource_type", "N/A"),
+                "IP": log.get("ip_address", "N/A"),
+                "Details": details_str,
+            })
+        
+        logs_df = pd.DataFrame(logs_df_data)
+        st.dataframe(logs_df, use_container_width=True, hide_index=True)
+        
+        # Show full details in expander for selected log
+        st.subheader("📄 Log Details")
+        selected_idx = st.selectbox(
+            "Select log to view full details:",
+            options=range(len(logs_data["items"])),
+            format_func=lambda x: f"{logs_data['items'][x].get('timestamp', 'N/A')[:19]} - {logs_data['items'][x].get('action', 'N/A')}"
+        )
+        
+        if selected_idx is not None:
+            selected_log = logs_data["items"][selected_idx]
+            st.json(selected_log)
+    elif logs_data and logs_data.get("total") == 0:
+        st.info("No activity logs found matching the filters.")
+    else:
+        st.warning("Unable to load activity logs. Please check your API key and connection.")
 
 # Footer
 st.markdown("---")
