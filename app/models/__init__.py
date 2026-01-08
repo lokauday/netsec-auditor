@@ -8,6 +8,7 @@ from app.models.routing import Route
 from app.models.audit_record import AuditRecord
 from app.models.api_key import APIKey
 from app.models.activity_log import ActivityLog
+from app.models.rule import Rule
 
 __all__ = [
     "ConfigFile",
@@ -19,5 +20,6 @@ __all__ = [
     "AuditRecord",
     "APIKey",
     "ActivityLog",
+    "Rule",
 ]
 

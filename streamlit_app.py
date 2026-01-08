@@ -502,12 +502,12 @@ if st.session_state.config_id and not st.session_state.config_history:
         pass  # Fail silently if history can't be loaded
 
 # Tabs for organization
-tab_names = ["📊 Overview", "📋 Findings", "📜 History", "📝 Audit Trail"]
+tab_names = ["📊 Overview", "📋 Findings", "📜 History", "🔧 Rules", "📝 Audit Trail"]
 if st.session_state.is_admin:
     tab_names.append("🔐 Admin: API Keys")
 tabs = st.tabs(tab_names)
-tab1, tab2, tab3, tab_audit = tabs[0], tabs[1], tabs[2], tabs[3]
-tab_admin = tabs[4] if st.session_state.is_admin else None
+tab1, tab2, tab3, tab_rules, tab_audit = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
+tab_admin = tabs[5] if st.session_state.is_admin else None
 
 with tab1:
     # Section 1: Current Config
@@ -1124,6 +1124,306 @@ with tab3:
         st.info("No audits found for the selected filters.")
     elif not history_result:
         st.warning("Could not load audit history. Check backend URL and API key.")
+
+# ============= Rules Tab =============
+with tab_rules:
+    st.header("🔧 Security Rules Management")
+    st.markdown("Define and manage custom security rules for configuration auditing.")
+    
+    # Helper functions
+    def list_rules(vendor: Optional[str] = None, enabled: Optional[bool] = None) -> Dict[str, Any]:
+        """List all rules."""
+        url = f"{API_BASE_URL}/api/v1/rules/"
+        headers = get_headers()
+        params = {}
+        if vendor:
+            params["vendor"] = vendor
+        if enabled is not None:
+            params["enabled"] = enabled
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return {"items": [], "total": 0}
+    
+    def get_rule(rule_id: int) -> Optional[Dict[str, Any]]:
+        """Get a specific rule."""
+        url = f"{API_BASE_URL}/api/v1/rules/{rule_id}"
+        headers = get_headers()
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return None
+    
+    def create_rule(rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new rule."""
+        url = f"{API_BASE_URL}/api/v1/rules/"
+        headers = get_headers()
+        try:
+            response = requests.post(url, headers=headers, json=rule_data, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return None
+    
+    def update_rule(rule_id: int, rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update a rule."""
+        url = f"{API_BASE_URL}/api/v1/rules/{rule_id}"
+        headers = get_headers()
+        try:
+            response = requests.put(url, headers=headers, json=rule_data, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return None
+    
+    def delete_rule(rule_id: int) -> bool:
+        """Disable a rule."""
+        url = f"{API_BASE_URL}/api/v1/rules/{rule_id}"
+        headers = get_headers()
+        try:
+            response = requests.delete(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            handle_api_error(e)
+            return False
+    
+    # Filters
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        filter_vendor = st.selectbox(
+            "Filter by Vendor",
+            options=["All", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"],
+            index=0
+        )
+    with col2:
+        filter_enabled = st.selectbox(
+            "Filter by Status",
+            options=["All", "Enabled", "Disabled"],
+            index=0
+        )
+    with col3:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+    
+    # List rules
+    rules_data = list_rules(
+        vendor=filter_vendor if filter_vendor != "All" else None,
+        enabled=True if filter_enabled == "Enabled" else (False if filter_enabled == "Disabled" else None)
+    )
+    
+    if rules_data.get("items"):
+        rules_df_data = []
+        for rule in rules_data["items"]:
+            rules_df_data.append({
+                "ID": rule.get("id"),
+                "Name": rule.get("name", "N/A"),
+                "Vendor": rule.get("vendor", "All"),
+                "Category": rule.get("category", "N/A"),
+                "Severity": rule.get("severity", "N/A"),
+                "Status": "✅ Enabled" if rule.get("enabled") else "❌ Disabled",
+                "Created": rule.get("created_at", "N/A")[:19] if rule.get("created_at") else "N/A",
+            })
+        
+        rules_df = pd.DataFrame(rules_df_data)
+        st.dataframe(rules_df, use_container_width=True, hide_index=True)
+        
+        # Rule details and actions
+        st.subheader("📄 Rule Details & Actions")
+        rule_ids = [r.get("id") for r in rules_data["items"]]
+        selected_rule_id = st.selectbox(
+            "Select rule to view/edit:",
+            options=rule_ids,
+            format_func=lambda x: f"ID {x} - {next((r.get('name', 'N/A') for r in rules_data['items'] if r.get('id') == x), 'N/A')}"
+        )
+        
+        if selected_rule_id:
+            rule_detail = get_rule(selected_rule_id)
+            if rule_detail:
+                col_view, col_edit, col_delete = st.columns(3)
+                
+                with col_view:
+                    if st.button("👁️ View Details", use_container_width=True, key=f"view_{selected_rule_id}"):
+                        st.json(rule_detail)
+                
+                with col_edit:
+                    if st.button("✏️ Edit Rule", use_container_width=True, key=f"edit_{selected_rule_id}"):
+                        st.session_state[f"editing_rule_{selected_rule_id}"] = True
+                        st.rerun()
+                
+                with col_delete:
+                    if st.button("🗑️ Disable Rule", use_container_width=True, key=f"delete_{selected_rule_id}"):
+                        if delete_rule(selected_rule_id):
+                            st.success(f"✅ Rule {selected_rule_id} disabled")
+                            st.rerun()
+                
+                # Edit form
+                if st.session_state.get(f"editing_rule_{selected_rule_id}", False):
+                    st.markdown("---")
+                    st.subheader(f"✏️ Edit Rule: {rule_detail.get('name')}")
+                    
+                    with st.form(f"edit_rule_form_{selected_rule_id}"):
+                        edit_name = st.text_input("Name", value=rule_detail.get("name", ""))
+                        edit_description = st.text_area("Description", value=rule_detail.get("description", ""))
+                        edit_vendor = st.selectbox(
+                            "Vendor",
+                            options=["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"],
+                            index=(["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"].index(rule_detail.get("vendor", "")) if rule_detail.get("vendor") in ["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"] else 0)
+                        )
+                        edit_severity = st.selectbox(
+                            "Severity",
+                            options=["critical", "high", "medium", "low"],
+                            index=["critical", "high", "medium", "low"].index(rule_detail.get("severity", "medium"))
+                        )
+                        edit_enabled = st.checkbox("Enabled", value=rule_detail.get("enabled", True))
+                        
+                        # Match criteria (simplified - show as JSON)
+                        st.markdown("**Match Criteria (JSON):**")
+                        import json
+                        match_criteria_str = st.text_area(
+                            "Match Criteria",
+                            value=json.dumps(rule_detail.get("match_criteria", {}), indent=2),
+                            height=150
+                        )
+                        
+                        submitted = st.form_submit_button("💾 Save Changes", use_container_width=True)
+                        
+                        if submitted:
+                            try:
+                                match_criteria = json.loads(match_criteria_str)
+                                update_data = {
+                                    "name": edit_name,
+                                    "description": edit_description,
+                                    "vendor": edit_vendor if edit_vendor else None,
+                                    "severity": edit_severity,
+                                    "enabled": edit_enabled,
+                                    "match_criteria": match_criteria,
+                                }
+                                
+                                result = update_rule(selected_rule_id, update_data)
+                                if result:
+                                    st.success("✅ Rule updated successfully")
+                                    st.session_state[f"editing_rule_{selected_rule_id}"] = False
+                                    st.rerun()
+                            except json.JSONDecodeError:
+                                st.error("❌ Invalid JSON in match criteria")
+                            except Exception as e:
+                                st.error(f"❌ Error updating rule: {str(e)}")
+    else:
+        st.info("No rules found matching the filters.")
+    
+    st.markdown("---")
+    
+    # Create new rule
+    st.subheader("➕ Create New Rule")
+    
+    # Rule templates
+    template_options = {
+        "Custom": None,
+        "Permit Any Any": {
+            "name": "Permit Any Any Traffic",
+            "description": "Detects ACL rules that permit any-to-any traffic",
+            "vendor": "cisco_asa",
+            "category": "acl",
+            "severity": "critical",
+            "match_criteria": {
+                "pattern": "permit ip any any",
+                "pattern_type": "contains"
+            }
+        },
+        "SSH from Internet": {
+            "name": "SSH Access from Internet",
+            "description": "Detects SSH access rules from external sources",
+            "vendor": None,
+            "category": "acl",
+            "severity": "high",
+            "match_criteria": {
+                "pattern": "permit tcp.*eq 22",
+                "pattern_type": "regex"
+            }
+        },
+        "RFC1918 from Outside": {
+            "name": "RFC1918 Access from Outside",
+            "description": "Detects inbound rules allowing access to private networks from outside",
+            "vendor": None,
+            "category": "acl",
+            "severity": "high",
+            "match_criteria": {
+                "pattern": "permit.*10\\.0\\.0\\.0|permit.*172\\.16\\.|permit.*192\\.168\\.",
+                "pattern_type": "regex"
+            }
+        },
+    }
+    
+    selected_template = st.selectbox("Use Template", options=list(template_options.keys()))
+    
+    with st.form("create_rule_form"):
+        template = template_options[selected_template] if selected_template != "Custom" else None
+        
+        new_rule_name = st.text_input("Rule Name", value=template.get("name", "") if template else "")
+        new_rule_description = st.text_area("Description", value=template.get("description", "") if template else "")
+        new_rule_vendor = st.selectbox(
+            "Vendor",
+            options=["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"],
+            index=(["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"].index(template.get("vendor", "")) if template and template.get("vendor") in ["", "cisco_asa", "cisco_ios", "fortinet", "palo_alto"] else 0)
+        )
+        new_rule_category = st.selectbox(
+            "Category",
+            options=["general", "acl", "nat", "vpn", "routing", "interface", "crypto", "authentication"],
+            index=["general", "acl", "nat", "vpn", "routing", "interface", "crypto", "authentication"].index(template.get("category", "general")) if template and template.get("category") in ["general", "acl", "nat", "vpn", "routing", "interface", "crypto", "authentication"] else 0
+        )
+        new_rule_severity = st.selectbox(
+            "Severity",
+            options=["critical", "high", "medium", "low"],
+            index=["critical", "high", "medium", "low"].index(template.get("severity", "medium")) if template and template.get("severity") in ["critical", "high", "medium", "low"] else 2
+        )
+        new_rule_enabled = st.checkbox("Enabled", value=True)
+        
+        st.markdown("**Match Criteria (JSON):**")
+        import json
+        default_match_criteria = template.get("match_criteria", {}) if template else {}
+        new_rule_match_criteria = st.text_area(
+            "Match Criteria",
+            value=json.dumps(default_match_criteria, indent=2),
+            height=150,
+            help="JSON object with pattern matching criteria. Example: {\"pattern\": \"permit ip any any\", \"pattern_type\": \"contains\"}"
+        )
+        
+        submitted = st.form_submit_button("🔧 Create Rule", use_container_width=True)
+        
+        if submitted:
+            if not new_rule_name or not new_rule_name.strip():
+                st.error("⚠️ Please provide a rule name")
+            else:
+                try:
+                    match_criteria = json.loads(new_rule_match_criteria)
+                    rule_data = {
+                        "name": new_rule_name.strip(),
+                        "description": new_rule_description.strip() if new_rule_description else None,
+                        "vendor": new_rule_vendor if new_rule_vendor else None,
+                        "category": new_rule_category,
+                        "severity": new_rule_severity,
+                        "enabled": new_rule_enabled,
+                        "match_criteria": match_criteria,
+                    }
+                    
+                    with st.spinner("Creating rule..."):
+                        result = create_rule(rule_data)
+                        if result:
+                            st.success("✅ Rule created successfully!")
+                            st.rerun()
+                except json.JSONDecodeError:
+                    st.error("❌ Invalid JSON in match criteria")
+                except Exception as e:
+                    st.error(f"❌ Error creating rule: {str(e)}")
 
 # Admin tab
 if tab_admin:

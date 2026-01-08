@@ -13,6 +13,7 @@ from app.models.vpn import VPN
 from app.models.routing import Route
 from app.models.interface import Interface
 from app.models.audit_record import AuditRecord
+from app.models.rule import Rule
 from app.schemas.findings import SecurityFinding
 from app.core.config import settings
 
@@ -63,7 +64,7 @@ class AuditService:
         routes = self.db.query(Route).filter(Route.config_file_id == config_file_id).all()
         interfaces = self.db.query(Interface).filter(Interface.config_file_id == config_file_id).all()
         
-        # Run rule-based security checks
+        # Run rule-based security checks (includes both built-in and custom rules)
         findings = self._run_rule_based_checks(config_file, acls, nat_rules, routes, interfaces)
         
         # AI analysis flag (use parameter if provided)
@@ -1329,6 +1330,10 @@ class AuditService:
         
         # ========== END PHASE D CHECKS ==========
         
+        # Evaluate custom rules from database
+        custom_findings = self._evaluate_custom_rules(config_file, acls, nat_rules, routes, interfaces, raw_config_text)
+        findings.extend(custom_findings)
+        
         return findings
     
     def _run_ai_analysis(
@@ -1626,3 +1631,146 @@ Focus on:
             return False
         except (ValueError, ipaddress.AddressValueError):
             return False
+    
+    def _evaluate_custom_rules(
+        self,
+        config_file: ConfigFile,
+        acls: List[ACL],
+        nat_rules: List[NATRule],
+        routes: List[Route],
+        interfaces: List[Interface],
+        raw_config_text: str,
+    ) -> List[SecurityFinding]:
+        """
+        Evaluate custom rules from database against the configuration.
+        
+        Returns list of SecurityFinding objects for matching rules.
+        """
+        findings = []
+        
+        try:
+            # Load enabled rules that match this vendor (or are vendor-agnostic)
+            vendor_str = config_file.vendor.value if config_file.vendor else None
+            query = self.db.query(Rule).filter(Rule.enabled == True)
+            
+            # Filter by vendor if rule specifies one, or include vendor-agnostic rules
+            if vendor_str:
+                query = query.filter(
+                    (Rule.vendor == vendor_str) | (Rule.vendor.is_(None))
+                )
+            else:
+                query = query.filter(Rule.vendor.is_(None))
+            
+            custom_rules = query.all()
+            
+            for rule in custom_rules:
+                try:
+                    if self._rule_matches(rule, config_file, acls, nat_rules, routes, interfaces, raw_config_text):
+                        findings.append(
+                            SecurityFinding(
+                                severity=rule.severity.value,
+                                code=f"CUSTOM_RULE_{rule.id}",
+                                description=rule.description or f"Custom rule violation: {rule.name}",
+                                recommendation=f"Review and fix configuration to comply with rule: {rule.name}",
+                                affected_objects=[f"Rule: {rule.name}"],
+                            )
+                        )
+                except Exception as e:
+                    logger.warning(f"Error evaluating custom rule {rule.id} ({rule.name}): {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Error loading custom rules: {e}", exc_info=True)
+        
+        return findings
+    
+    def _rule_matches(
+        self,
+        rule: Rule,
+        config_file: ConfigFile,
+        acls: List[ACL],
+        nat_rules: List[NATRule],
+        routes: List[Route],
+        interfaces: List[Interface],
+        raw_config_text: str,
+    ) -> bool:
+        """
+        Check if a custom rule matches the configuration.
+        
+        Returns True if the rule matches (violation detected).
+        """
+        match_criteria = rule.match_criteria or {}
+        raw_lower = (raw_config_text or "").lower()
+        
+        # Pattern matching (most common)
+        pattern = match_criteria.get("pattern")
+        pattern_type = match_criteria.get("pattern_type", "contains")
+        
+        if pattern:
+            pattern_lower = pattern.lower()
+            if pattern_type == "contains":
+                if pattern_lower in raw_lower:
+                    return True
+            elif pattern_type == "equals":
+                if pattern_lower == raw_lower.strip():
+                    return True
+            elif pattern_type == "starts_with":
+                if raw_lower.startswith(pattern_lower):
+                    return True
+            elif pattern_type == "ends_with":
+                if raw_lower.endswith(pattern_lower):
+                    return True
+            elif pattern_type == "regex":
+                import re
+                try:
+                    if re.search(pattern, raw_lower, re.IGNORECASE):
+                        return True
+                except re.error:
+                    logger.warning(f"Invalid regex pattern in rule {rule.id}: {pattern}")
+        
+        # ACL-specific matching
+        acl_source = match_criteria.get("acl_source")
+        acl_destination = match_criteria.get("acl_destination")
+        acl_protocol = match_criteria.get("acl_protocol")
+        acl_action = match_criteria.get("acl_action")
+        
+        if acl_source or acl_destination or acl_protocol or acl_action:
+            for acl in acls:
+                # Simple matching - can be enhanced
+                if acl_action and acl_action.lower() not in str(acl.action or "").lower():
+                    continue
+                if acl_protocol and acl_protocol.lower() not in str(acl.protocol or "").lower():
+                    continue
+                if acl_source and acl_source.lower() not in str(acl.source or "").lower():
+                    continue
+                if acl_destination and acl_destination.lower() not in str(acl.destination or "").lower():
+                    continue
+                # If we get here, all specified criteria match
+                return True
+        
+        # NAT-specific matching
+        nat_source = match_criteria.get("nat_source")
+        nat_destination = match_criteria.get("nat_destination")
+        
+        if nat_source or nat_destination:
+            for nat in nat_rules:
+                if nat_source and nat_source.lower() not in str(nat.source or "").lower():
+                    continue
+                if nat_destination and nat_destination.lower() not in str(nat.destination or "").lower():
+                    continue
+                return True
+        
+        # Interface-specific matching
+        interface_name = match_criteria.get("interface_name")
+        interface_type = match_criteria.get("interface_type")
+        
+        if interface_name or interface_type:
+            for interface in interfaces:
+                if interface_name and interface_name.lower() not in str(interface.name or "").lower():
+                    continue
+                if interface_type and interface_type.lower() not in str(interface.interface_type or "").lower():
+                    continue
+                return True
+        
+        # Default: if no specific criteria match, return False
+        return False
