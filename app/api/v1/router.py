@@ -3,10 +3,13 @@ API v1 router.
 """
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import upload, audit, configs, audits, api_keys, activity, rules, devices, rule_packs, rules_ai
+from app.api.v1.endpoints import upload, audit, configs, audits, api_keys, activity, rules, devices, rule_packs, rules_ai, health
 from app.api.v1.endpoints.api_keys import auth_router
 
 api_router = APIRouter()
+
+# Health check endpoint (no prefix, so it's /api/v1/health)
+api_router.include_router(health.router, tags=["health"])
 
 api_router.include_router(configs.router, prefix="/configs", tags=["configs"])
 api_router.include_router(upload.router, prefix="/upload", tags=["upload"])

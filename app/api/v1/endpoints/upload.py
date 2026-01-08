@@ -14,6 +14,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, Security, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import get_db
 from app.core.auth import require_role, get_current_api_client, APIClient
@@ -50,6 +51,9 @@ async def upload_config_file(
     - environment: Environment type (prod, dev, lab, etc.)
     - location: Location or data center name
     """
+    # Get trace_id from request state (set by middleware)
+    trace_id = getattr(request.state, "trace_id", "unknown")
+    
     try:
         # Validate file type
         if not file.filename.endswith('.txt'):
@@ -82,7 +86,7 @@ async def upload_config_file(
                     linked_device_id = existing_device.id
             except Exception as e:
                 # If device lookup fails (e.g., table doesn't exist), log and continue without device linking
-                logger.debug(f"Could not lookup device by name '{device_name}': {e}. Continuing without device linking.")
+                logger.debug(f"[{trace_id}] Could not lookup device by name '{device_name}': {e}. Continuing without device linking.")
                 linked_device_id = None
         
         # Save and parse
@@ -98,7 +102,7 @@ async def upload_config_file(
         )
         
         logger.info(
-            f"Config uploaded successfully: filename='{file.filename}', "
+            f"[{trace_id}] Config uploaded successfully: filename='{file.filename}', "
             f"vendor={config_file.vendor.value}, config_id={config_file.id}, "
             f"file_size={config_file.file_size} bytes, "
             f"device_name={device_name}, environment={environment}"
@@ -123,7 +127,7 @@ async def upload_config_file(
             )
         except Exception as e:
             # Activity logging is non-critical - log error but don't fail the upload
-            logger.warning(f"Failed to log activity for upload (config_id={config_file.id}): {e}")
+            logger.warning(f"[{trace_id}] Failed to log activity for upload (config_id={config_file.id}): {e}")
         
         return ConfigFileResponse(
             id=config_file.id,
@@ -142,8 +146,19 @@ async def upload_config_file(
     except HTTPException:
         # Re-raise HTTPExceptions (like validation errors) as-is
         raise
+    except SQLAlchemyError as e:
+        # Database errors - return 500 with trace_id and clear message
+        logger.error(
+            f"[{trace_id}] Database error during upload: {e}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: check DATABASE_URL / migrations. Trace ID: {trace_id}",
+            headers={"X-Trace-ID": trace_id}
+        )
     except ValueError as e:
-        logger.error(f"Validation error during upload: {e}")
+        logger.error(f"[{trace_id}] Validation error during upload: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -152,17 +167,15 @@ async def upload_config_file(
         error_type = type(e).__name__
         error_msg = str(e)
         logger.error(
-            f"Error during config upload (type: {error_type}): {error_msg}",
+            f"[{trace_id}] Error during config upload (type: {error_type}): {error_msg}",
             exc_info=True
         )
-        # In debug mode, return more detailed error information
-        if settings.DEBUG:
-            detail = f"Failed to upload configuration file: {error_type}: {error_msg}"
-        else:
-            detail = "Failed to upload configuration file. Check server logs for details."
+        # Return error with trace_id
+        detail = f"Failed to upload configuration file: {error_type}: {error_msg}" if settings.DEBUG else "Failed to upload configuration file. Check server logs for details."
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=detail
+            detail=detail,
+            headers={"X-Trace-ID": trace_id}
         )
 
 

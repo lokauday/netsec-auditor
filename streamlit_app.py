@@ -180,9 +180,32 @@ def upload_config(
         response = requests.post(url, files=files, data=data, headers=headers, timeout=30)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.RequestException as e:
-        if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code in [401, 403]:
+    except requests.exceptions.HTTPError as e:
+        # HTTP error (4xx, 5xx) - show detailed error from response
+        if e.response is not None:
+            try:
+                error_detail = e.response.json()
+                status_code = e.response.status_code
+                trace_id = e.response.headers.get("X-Trace-ID", "N/A")
+                error_msg = (
+                    f"Upload failed: {status_code} {e.response.reason}\n"
+                    f"Trace ID: {trace_id}\n"
+                    f"Details: {error_detail.get('detail', error_detail)}"
+                )
+            except (ValueError, KeyError):
+                # Response is not JSON or doesn't have expected structure
+                error_msg = (
+                    f"Upload failed: {e.response.status_code} {e.response.reason}\n"
+                    f"Response: {e.response.text[:500]}"
+                )
+        else:
+            error_msg = f"Upload failed: {str(e)}"
+        
+        if e.response and e.response.status_code in [401, 403]:
             handle_api_error(e)
+        raise Exception(error_msg)
+    except requests.exceptions.RequestException as e:
+        # Network/timeout errors
         raise Exception(f"Upload failed: {str(e)}")
 
 
