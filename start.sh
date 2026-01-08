@@ -5,16 +5,8 @@ echo "=========================================="
 echo "NetSec Auditor API - Starting up..."
 echo "=========================================="
 
-# Check if DATABASE_URL is set
-if [ -z "$DATABASE_URL" ]; then
-    echo "WARNING: DATABASE_URL not set. Skipping migrations."
-    echo "Using SQLite or fallback database configuration."
-else
-    echo "DATABASE_URL detected, running migrations..."
-    echo "Running: alembic upgrade head"
-    alembic upgrade head
-    echo "Migrations completed successfully."
-fi
+# Note: Migrations are now handled in app/main.py lifespan function
+# This prevents double-migration runs and ensures idempotent behavior
 
 echo ""
 echo "Starting FastAPI server..."

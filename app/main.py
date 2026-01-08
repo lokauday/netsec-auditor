@@ -49,30 +49,31 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up NetSec Auditor API...")
     
     # Run Alembic migrations if DATABASE_URL is set (Railway/cloud deployment)
-    # This ensures migrations run even if start.sh didn't execute them
+    # Migrations are idempotent and will only run once per deployment
     import os
     if os.getenv("DATABASE_URL"):
         try:
             from alembic.config import Config
             from alembic import command
-            import traceback
             
-            logger.info("DATABASE_URL detected, running Alembic migrations...")
+            logger.info("[MIGRATION] DATABASE_URL detected, running Alembic migrations (idempotent)...")
             alembic_cfg = Config("alembic.ini")
-            # Run migrations with safe retry - won't crash if already migrated
+            # Run migrations - idempotent ENUM creation prevents duplicate errors
             command.upgrade(alembic_cfg, "head")
-            logger.info("Alembic migrations completed successfully")
+            logger.info("[MIGRATION] Alembic migrations completed successfully (or already up-to-date)")
         except Exception as e:
             # Log error but don't fail startup - migrations may have already run
             # or database may not be ready yet (Railway sometimes has timing issues)
             error_msg = str(e)
             trace_id = str(uuid.uuid4())
             logger.warning(
-                f"[{trace_id}] Alembic migration check failed: {error_msg}. "
+                f"[MIGRATION] [{trace_id}] Alembic migration check failed: {error_msg}. "
                 "This is OK if migrations already ran or database is not ready yet. "
                 "Check logs if you see database errors."
             )
-            logger.debug(f"[{trace_id}] Migration error details:", exc_info=True)
+            logger.debug(f"[MIGRATION] [{trace_id}] Migration error details:", exc_info=True)
+    else:
+        logger.info("[MIGRATION] DATABASE_URL not set, skipping migrations (local dev mode)")
     
     # Ensure database tables are created (fallback for local dev without Alembic)
     try:
