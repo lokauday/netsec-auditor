@@ -1,5 +1,14 @@
 """
 Upload endpoint for configuration files.
+
+ROUTE ALIGNMENT (Critical for production):
+- FastAPI route: POST /api/v1/upload/ (with trailing slash)
+- Streamlit UI calls: POST /api/v1/upload/ (with trailing slash)
+- Router prefix: /upload (from app/api/v1/router.py)
+- Full path: /api/v1/upload/ (from app/main.py prefix + router prefix + route path)
+
+This route must match exactly what the UI calls to prevent "Method Not Allowed" errors.
+See tests/test_routes_upload_path.py and tests/test_upload_ui_flow.py for verification.
 """
 import logging
 from typing import Optional
