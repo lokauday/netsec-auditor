@@ -33,15 +33,36 @@ if "api_key" not in st.session_state:
     st.session_state.api_key = None
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
-if "backend_url" not in st.session_state:
-    st.session_state.backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-
-
 # ============= API Client Helpers =============
 
-def get_base_url() -> str:
-    """Get backend base URL from session state."""
-    return st.session_state.backend_url
+def get_api_base_url() -> str:
+    """
+    Normalize API base URL from environment variable.
+    
+    Handles both bare hostnames and full URLs:
+    - Empty env var -> http://localhost:8000 (local dev)
+    - Full URL (http:// or https://) -> use as-is
+    - Bare hostname -> prepend https://
+    """
+    raw = os.getenv("API_BASE_URL", "").strip().rstrip("/")
+    
+    # If the env var is empty, default to local dev
+    if not raw:
+        return "http://localhost:8000"
+    
+    # If it already looks like a full URL, trust it
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    
+    # Otherwise treat it as a bare host and make it HTTPS by default
+    return f"https://{raw}"
+
+
+# Set global constant for API base URL
+API_BASE_URL = get_api_base_url()
+
+# Debug print at startup
+print(f"[NetSec Auditor UI] Using API_BASE_URL = {API_BASE_URL}")
 
 
 def get_api_key() -> Optional[str]:
@@ -52,7 +73,7 @@ def get_api_key() -> Optional[str]:
 def check_admin_status() -> bool:
     """Check if current user is admin by calling /auth/me endpoint."""
     try:
-        url = f"{get_base_url()}/api/v1/auth/me"
+        url = f"{API_BASE_URL}/api/v1/auth/me"
         headers = get_headers()
         response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
@@ -102,7 +123,7 @@ def upload_config(
     location: Optional[str] = None
 ) -> Dict[str, Any]:
     """Upload configuration file to backend."""
-    url = f"{get_base_url()}/api/v1/upload/"
+    url = f"{API_BASE_URL}/api/v1/upload/"
     headers = get_headers()
     
     files = {"file": (filename, file, "text/plain")}
@@ -128,7 +149,7 @@ def upload_config(
 
 def parse_config(config_id: int) -> Dict[str, Any]:
     """Parse uploaded configuration."""
-    url = f"{get_base_url()}/api/v1/upload/{config_id}/parse"
+    url = f"{API_BASE_URL}/api/v1/upload/{config_id}/parse"
     headers = get_headers()
     
     try:
@@ -141,7 +162,7 @@ def parse_config(config_id: int) -> Dict[str, Any]:
 
 def run_audit(config_id: int, ai_enabled: bool = False) -> Dict[str, Any]:
     """Run security audit on parsed configuration."""
-    url = f"{get_base_url()}/api/v1/audit/{config_id}"
+    url = f"{API_BASE_URL}/api/v1/audit/{config_id}"
     headers = get_headers()
     
     try:
@@ -161,7 +182,7 @@ def run_audit(config_id: int, ai_enabled: bool = False) -> Dict[str, Any]:
 
 def get_config_detail(config_id: int) -> Dict[str, Any]:
     """Get detailed information about a configuration."""
-    url = f"{get_base_url()}/api/v1/configs/{config_id}"
+    url = f"{API_BASE_URL}/api/v1/configs/{config_id}"
     headers = get_headers()
     
     try:
@@ -174,7 +195,7 @@ def get_config_detail(config_id: int) -> Dict[str, Any]:
 
 def get_audit_report_pdf(config_id: int) -> BytesIO:
     """Download PDF audit report."""
-    url = f"{get_base_url()}/api/v1/audit/{config_id}/report"
+    url = f"{API_BASE_URL}/api/v1/audit/{config_id}/report"
     headers = get_headers()
     
     try:
@@ -187,7 +208,7 @@ def get_audit_report_pdf(config_id: int) -> BytesIO:
 
 def list_configs(limit: int = 20, offset: int = 0) -> Dict[str, Any]:
     """List configuration files with pagination."""
-    url = f"{get_base_url()}/api/v1/configs/"
+    url = f"{API_BASE_URL}/api/v1/configs/"
     headers = get_headers()
     params = {"limit": limit, "offset": offset}
     
@@ -201,7 +222,7 @@ def list_configs(limit: int = 20, offset: int = 0) -> Dict[str, Any]:
 
 def get_config_audits(config_id: int) -> Dict[str, Any]:
     """Get audit history for a configuration."""
-    url = f"{get_base_url()}/api/v1/configs/{config_id}/audits"
+    url = f"{API_BASE_URL}/api/v1/configs/{config_id}/audits"
     headers = get_headers()
     
     try:
@@ -219,7 +240,7 @@ def get_audit_summary(
     environment: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get audit summary/analytics with optional filters."""
-    url = f"{get_base_url()}/api/v1/audits/summary"
+    url = f"{API_BASE_URL}/api/v1/audits/summary"
     headers = get_headers()
     params = {}
     
@@ -250,7 +271,7 @@ def get_audit_history(
     offset: int = 0
 ) -> Dict[str, Any]:
     """Get filtered audit history."""
-    url = f"{get_base_url()}/api/v1/audits/history"
+    url = f"{API_BASE_URL}/api/v1/audits/history"
     headers = get_headers()
     params = {"limit": limit, "offset": offset}
     if start_date:
@@ -302,7 +323,13 @@ def format_severity_badge(severity: str) -> str:
 with st.sidebar:
     st.header("⚙️ Settings")
     
-    backend_url = st.text_input("Backend URL", key="backend_url")
+    # Display API base URL (read-only, set via API_BASE_URL env var)
+    st.text_input(
+        "Backend URL",
+        value=API_BASE_URL,
+        disabled=True,
+        help="Set via API_BASE_URL environment variable"
+    )
     
     api_key = st.text_input(
         "API Key (Optional)",
@@ -1068,7 +1095,7 @@ if tab_admin:
         # Helper functions for API key management
         def list_api_keys() -> Dict[str, Any]:
             """List all API keys."""
-            url = f"{get_base_url()}/api/v1/api-keys/"
+            url = f"{API_BASE_URL}/api/v1/api-keys/"
             headers = get_headers()
             try:
                 response = requests.get(url, headers=headers, timeout=10)
@@ -1080,7 +1107,7 @@ if tab_admin:
         
         def create_api_key(name: str, role: str) -> Dict[str, Any]:
             """Create a new API key."""
-            url = f"{get_base_url()}/api/v1/api-keys/"
+            url = f"{API_BASE_URL}/api/v1/api-keys/"
             headers = get_headers()
             try:
                 response = requests.post(
@@ -1097,7 +1124,7 @@ if tab_admin:
         
         def deactivate_api_key(key_id: int) -> bool:
             """Deactivate an API key."""
-            url = f"{get_base_url()}/api/v1/api-keys/{key_id}/deactivate"
+            url = f"{API_BASE_URL}/api/v1/api-keys/{key_id}/deactivate"
             headers = get_headers()
             try:
                 response = requests.patch(url, headers=headers, timeout=10)
