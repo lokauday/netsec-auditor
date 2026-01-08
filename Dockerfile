@@ -23,10 +23,10 @@ RUN chmod +x /app/start.sh
 RUN mkdir -p uploads logs && \
     chmod -R 755 uploads logs
 
-# Expose port
-EXPOSE 8000
+# Expose port (default 8080, but Railway will use $PORT)
+EXPOSE 8080
 
-# Run the application using startup script (runs migrations then starts server)
-# Railway sets $PORT env var - use it if available, otherwise default to 8000
-CMD ["bash", "start.sh"]
+# Run the application using startup script
+# Railway sets $PORT env var - script will use it or default to 8080
+CMD ["/app/start.sh"]
 
